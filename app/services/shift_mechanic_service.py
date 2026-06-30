@@ -5,6 +5,28 @@ from app.models.shift_mechanic import ShiftMechanic, MechanicType
 
 
 class ShiftMechanicService:
+    async def get_by_shift_and_user(
+        self,
+        shift_id: int,
+        user_id: int,
+    ) -> ShiftMechanic | None:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(ShiftMechanic).where(
+                    ShiftMechanic.shift_id == shift_id,
+                    ShiftMechanic.user_id == user_id,
+                )
+            )
+
+            return result.scalar_one_or_none()
+
+    async def count_main(self, shift_id: int) -> int:
+        mechanics = await self.get_by_shift(shift_id)
+        return sum(
+            1
+            for mechanic in mechanics
+            if mechanic.mechanic_type == MechanicType.MAIN
+        )
 
     async def assign(
         self,
@@ -13,6 +35,20 @@ class ShiftMechanicService:
         mechanic_type: MechanicType,
     ):
         async with SessionLocal() as session:
+            result = await session.execute(
+                select(ShiftMechanic).where(
+                    ShiftMechanic.shift_id == shift_id,
+                    ShiftMechanic.user_id == user_id,
+                )
+            )
+            mechanic = result.scalar_one_or_none()
+
+            if mechanic:
+                mechanic.mechanic_type = mechanic_type
+                await session.commit()
+                await session.refresh(mechanic)
+                return mechanic
+
             mechanic = ShiftMechanic(
                 shift_id=shift_id,
                 user_id=user_id,

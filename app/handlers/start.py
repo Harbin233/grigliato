@@ -11,8 +11,12 @@ from aiogram.types import (
 )
 
 from app.models.user import UserRole
+from app.models.shift_mechanic import MechanicType
+from app.services.machine_service import machine_service
+from app.services.shift_mechanic_service import shift_mechanic_service
 from app.services.shift_service import shift_service
 from app.services.user_service import user_service
+from app.services.work_session_service import work_session_service
 from app.states.register import RegisterState
 
 router = Router()
@@ -55,6 +59,40 @@ shift_open_keyboard = InlineKeyboardMarkup(
         ]
     ]
 )
+
+
+mechanic_type_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Основной",
+                callback_data="mechanic_type:main",
+            ),
+            InlineKeyboardButton(
+                text="Вспомогательный",
+                callback_data="mechanic_type:assistant",
+            ),
+        ]
+    ]
+)
+
+
+async def machines_keyboard() -> InlineKeyboardMarkup:
+    machines = await machine_service.get_all()
+    rows = []
+
+    for index in range(0, len(machines), 2):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=machine.name,
+                    callback_data=f"select_machine:{machine.id}",
+                )
+                for machine in machines[index:index + 2]
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(CommandStart())
@@ -115,9 +153,43 @@ async def start_work(
         )
         return
 
+    if user.role == UserRole.MECHANIC:
+        assigned = await shift_mechanic_service.get_by_shift_and_user(
+            active.id,
+            user.id,
+        )
+
+        if assigned:
+            mechanic_type_text = (
+                "основной"
+                if assigned.mechanic_type == MechanicType.MAIN
+                else "вспомогательный"
+            )
+            await message.answer(
+                "✅ Вы уже отмечены в смене.\n\n"
+                f"Смена №{active.shift_number}\n"
+                f"Статус: {mechanic_type_text}"
+            )
+            return
+
+        await message.answer(
+            "Выберите статус наладчика в этой смене:",
+            reply_markup=mechanic_type_keyboard,
+        )
+        return
+
+    active_work = await work_session_service.get_active(user.id)
+
+    if active_work:
+        await message.answer(
+            "✅ Вы уже приступили к работе.\n\n"
+            f"Станок: {active_work.machine.name}"
+        )
+        return
+
     await message.answer(
-        "✅ Вы приступили к работе.\n\n"
-        f"Открыта смена №{active.shift_number}."
+        "Выберите станок:",
+        reply_markup=await machines_keyboard(),
     )
 
 
@@ -139,6 +211,113 @@ async def open_shift(
     ok, text = await shift_service.start_shift(user)
 
     await callback.message.answer(text)
+
+    if ok:
+        await callback.message.answer(
+            "Выберите статус наладчика в этой смене:",
+            reply_markup=mechanic_type_keyboard,
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mechanic_type:"))
+async def select_mechanic_type(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer(
+            "Смена не найдена. Нажмите /start и попробуйте снова."
+        )
+        await callback.answer()
+        return
+
+    if user.role != UserRole.MECHANIC:
+        await callback.message.answer(
+            "Этот выбор доступен только наладчикам."
+        )
+        await callback.answer()
+        return
+
+    mechanic_type = (
+        MechanicType.MAIN
+        if callback.data.endswith(":main")
+        else MechanicType.ASSISTANT
+    )
+
+    if mechanic_type == MechanicType.MAIN:
+        existing = await shift_mechanic_service.get_by_shift_and_user(
+            active.id,
+            user.id,
+        )
+        main_count = await shift_mechanic_service.count_main(active.id)
+
+        if existing is None and main_count >= 2:
+            await callback.message.answer(
+                "В смене уже отмечены два основных наладчика."
+            )
+            await callback.answer()
+            return
+
+    await shift_mechanic_service.assign(
+        active.id,
+        user.id,
+        mechanic_type,
+    )
+
+    mechanic_type_text = (
+        "основной"
+        if mechanic_type == MechanicType.MAIN
+        else "вспомогательный"
+    )
+
+    await callback.message.answer(
+        "✅ Статус наладчика сохранен.\n\n"
+        f"Смена №{active.shift_number}\n"
+        f"Статус: {mechanic_type_text}"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("select_machine:"))
+async def select_machine(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer(
+            "Смена не найдена. Нажмите /start и попробуйте снова."
+        )
+        await callback.answer()
+        return
+
+    if user.role != UserRole.OPERATOR:
+        await callback.message.answer(
+            "Станок выбирает оператор."
+        )
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+
+    ok, text = await work_session_service.start(
+        user,
+        active,
+        machine_id,
+    )
+
+    await callback.message.answer(
+        ("✅ " if ok else "⚠️ ") + text
+    )
     await callback.answer()
 
 
