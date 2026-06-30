@@ -14,10 +14,12 @@ from app.core.config import settings
 from app.models.shift_mechanic import MechanicType
 from app.models.user import UserRole
 from app.services.machine_service import machine_service
+from app.services.production_service import production_service
 from app.services.shift_mechanic_service import shift_mechanic_service
 from app.services.shift_service import shift_service
 from app.services.user_service import user_service
 from app.services.work_session_service import work_session_service
+from app.states.production import ProductionState
 from app.states.register import RegisterState
 
 router = Router()
@@ -67,6 +69,7 @@ shift_keyboard = keyboard([
 
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
+    ["➕ Добавить продукцию"],
     ["🕒 Подработка"],
 ])
 
@@ -116,6 +119,43 @@ async def machines_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
                     callback_data=f"select_machine:{machine.id}:{suffix}",
                 )
                 for machine in machines[index:index + 2]
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def production_machines_keyboard() -> InlineKeyboardMarkup:
+    machines = await machine_service.get_all()
+    rows = []
+
+    for index in range(0, len(machines), 2):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=machine.name,
+                    callback_data=f"prod_machine:{machine.id}",
+                )
+                for machine in machines[index:index + 2]
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
+    machine_rails = await production_service.get_enabled_rails_for_machine(
+        machine_id
+    )
+    rows = []
+
+    for machine_rail in machine_rails:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=machine_rail.rail.name,
+                    callback_data=f"prod_rail:{machine_id}:{machine_rail.id}",
+                )
             ]
         )
 
@@ -278,6 +318,165 @@ async def handle_work_start(
     await message.answer(
         "Выберите станок:",
         reply_markup=await machines_keyboard(is_overtime),
+    )
+
+
+@router.message(F.text == "➕ Добавить продукцию")
+async def add_production(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(
+        message.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer("Продукцию добавляет наладчик или админ/мастер.")
+        return
+
+    active = await shift_service.get_active_shift()
+
+    if active is None:
+        await message.answer("Сначала откройте смену.")
+        return
+
+    await state.clear()
+    await message.answer(
+        "Выберите станок для записи продукции:",
+        reply_markup=await production_machines_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("prod_machine:"))
+async def select_production_machine(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию добавляет наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+    keyboard_markup = await production_rails_keyboard(machine_id)
+
+    if not keyboard_markup.inline_keyboard:
+        await callback.message.answer(
+            "Для этого станка пока нет активных реек/ставок."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите рейку:",
+        reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_rail:"))
+async def select_production_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию добавляет наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
+
+    await state.update_data(
+        machine_id=int(machine_id_raw),
+        machine_rail_id=int(machine_rail_id_raw),
+    )
+    await state.set_state(ProductionState.packs)
+
+    await callback.message.answer(
+        "Введите количество коробок целым числом:"
+    )
+    await callback.answer()
+
+
+@router.message(ProductionState.packs)
+async def input_production_packs(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(
+        message.from_user.id
+    )
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer("Продукцию добавляет наладчик или админ/мастер.")
+        await state.clear()
+        return
+
+    if active is None:
+        await message.answer("Смена не открыта.")
+        await state.clear()
+        return
+
+    if not message.text or not message.text.strip().isdigit():
+        await message.answer("Введите количество коробок целым числом.")
+        return
+
+    packs = int(message.text.strip())
+
+    if packs <= 0:
+        await message.answer("Количество коробок должно быть больше нуля.")
+        return
+
+    data = await state.get_data()
+
+    try:
+        entry, machine, rail, operator_total, mechanic_total = (
+            await production_service.create_entry(
+                shift=active,
+                machine_id=data["machine_id"],
+                machine_rail_id=data["machine_rail_id"],
+                packs=packs,
+                created_by=user,
+            )
+        )
+    except ValueError as error:
+        await message.answer(str(error))
+        await state.clear()
+        return
+
+    await state.clear()
+
+    await message.answer(
+        "✅ Продукция добавлена.\n\n"
+        f"Смена №{active.shift_number}\n"
+        f"Станок: {machine.name}\n"
+        f"Рейка: {rail.name}\n"
+        f"Коробок: {entry.packs}\n"
+        f"Штук: {entry.pieces}\n"
+        f"Пог. метров: {entry.meters}\n"
+        f"Оператор: {entry.operator_name}\n"
+        f"Оператору: {operator_total} ₽\n"
+        f"Наладчикам всего: {mechanic_total} ₽"
     )
 
 
