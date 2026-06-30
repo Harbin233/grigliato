@@ -16,6 +16,16 @@ class UserService:
 
             return result.scalar_one_or_none()
 
+    async def set_role(self, user_id: int, role: UserRole):
+        async with SessionLocal() as session:
+            user = await session.get(User, user_id)
+            user.role = role
+
+            await session.commit()
+            await session.refresh(user)
+
+            return user
+
     async def get_by_role(self, role: UserRole):
         async with SessionLocal() as session:
             result = await session.execute(

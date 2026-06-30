@@ -62,13 +62,20 @@ class WorkSessionService:
         user: User,
         shift: Shift,
         machine_id: int,
+        is_overtime: bool = False,
     ) -> tuple[bool, str]:
         active_for_user = await self.get_active(user.id)
 
         if active_for_user:
+            overtime_text = (
+                "\nПодработка: да"
+                if active_for_user.is_overtime
+                else ""
+            )
             return (
                 True,
-                f"Вы уже работаете на станке {active_for_user.machine.name}.",
+                f"Вы уже работаете на станке {active_for_user.machine.name}."
+                f"{overtime_text}",
             )
 
         active_for_machine = await self.get_active_by_machine(
@@ -90,6 +97,7 @@ class WorkSessionService:
                 shift_id=shift.id,
                 machine_id=machine_id,
                 started_at=datetime.now(),
+                is_overtime=is_overtime,
             )
 
             session.add(work)
@@ -98,10 +106,12 @@ class WorkSessionService:
             await session.refresh(work)
 
             machine = await session.get(Machine, machine_id)
+            overtime_text = "\nПодработка: да" if is_overtime else ""
 
             return (
                 True,
-                f"Вы приступили к работе на станке {machine.name}.",
+                f"Вы приступили к работе на станке {machine.name}."
+                f"{overtime_text}",
             )
 
     async def finish(

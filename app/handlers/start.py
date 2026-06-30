@@ -10,8 +10,9 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from app.models.user import UserRole
+from app.core.config import settings
 from app.models.shift_mechanic import MechanicType
+from app.models.user import UserRole
 from app.services.machine_service import machine_service
 from app.services.shift_mechanic_service import shift_mechanic_service
 from app.services.shift_service import shift_service
@@ -32,13 +33,32 @@ def keyboard(buttons: list[list[str]]) -> ReplyKeyboardMarkup:
     )
 
 
+def is_admin_id(telegram_id: int) -> bool:
+    return telegram_id in settings.admin_ids
+
+
+def role_text(role: UserRole) -> str:
+    if role == UserRole.ADMIN:
+        return "Админ / мастер"
+    if role == UserRole.MECHANIC:
+        return "Наладчик"
+    return "Оператор"
+
+
+def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
+    buttons = [
+        ["🔧 Наладчик"],
+        ["👷 Оператор"],
+    ]
+
+    if allow_admin:
+        buttons.insert(0, ["🛠 Админ / мастер"])
+
+    return keyboard(buttons)
+
+
 start_keyboard = keyboard([
     ["▶ Начать регистрацию"],
-])
-
-role_keyboard = keyboard([
-    ["🔧 Наладчик"],
-    ["👷 Оператор"],
 ])
 
 shift_keyboard = keyboard([
@@ -47,38 +67,45 @@ shift_keyboard = keyboard([
 
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
+    ["🕒 Подработка"],
 ])
 
-shift_open_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="🚀 Открыть смену",
-                callback_data="open_shift",
-            )
+
+def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
+    suffix = "1" if is_overtime else "0"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть смену",
+                    callback_data=f"open_shift:{suffix}",
+                )
+            ]
         ]
-    ]
-)
+    )
 
 
-mechanic_type_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="Основной",
-                callback_data="mechanic_type:main",
-            ),
-            InlineKeyboardButton(
-                text="Вспомогательный",
-                callback_data="mechanic_type:assistant",
-            ),
+def mechanic_type_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
+    suffix = "1" if is_overtime else "0"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Основной",
+                    callback_data=f"mechanic_type:main:{suffix}",
+                ),
+                InlineKeyboardButton(
+                    text="Вспомогательный",
+                    callback_data=f"mechanic_type:assistant:{suffix}",
+                ),
+            ]
         ]
-    ]
-)
+    )
 
 
-async def machines_keyboard() -> InlineKeyboardMarkup:
+async def machines_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     machines = await machine_service.get_all()
+    suffix = "1" if is_overtime else "0"
     rows = []
 
     for index in range(0, len(machines), 2):
@@ -86,13 +113,54 @@ async def machines_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=machine.name,
-                    callback_data=f"select_machine:{machine.id}",
+                    callback_data=f"select_machine:{machine.id}:{suffix}",
                 )
                 for machine in machines[index:index + 2]
             ]
         )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def ensure_admin_role(user):
+    if user and is_admin_id(user.telegram_id) and user.role != UserRole.ADMIN:
+        return await user_service.set_role(user.id, UserRole.ADMIN)
+    return user
+
+
+def mechanic_status_text(mechanic_type: MechanicType) -> str:
+    return (
+        "основной"
+        if mechanic_type == MechanicType.MAIN
+        else "вспомогательный"
+    )
+
+
+async def prompt_mechanic_status(
+    message: Message,
+    active,
+    user,
+    is_overtime: bool,
+) -> None:
+    assigned = await shift_mechanic_service.get_by_shift_and_user(
+        active.id,
+        user.id,
+    )
+
+    if assigned:
+        overtime_text = "\nПодработка: да" if assigned.is_overtime else ""
+        await message.answer(
+            "✅ Вы уже отмечены в смене.\n\n"
+            f"Смена №{active.shift_number}\n"
+            f"Статус: {mechanic_status_text(assigned.mechanic_type)}"
+            f"{overtime_text}"
+        )
+        return
+
+    await message.answer(
+        "Выберите статус наладчика в этой смене:",
+        reply_markup=mechanic_type_keyboard(is_overtime),
+    )
 
 
 @router.message(CommandStart())
@@ -103,12 +171,14 @@ async def cmd_start(
     user = await user_service.get_by_telegram_id(
         message.from_user.id
     )
+    user = await ensure_admin_role(user)
 
     if user:
         await state.clear()
 
         await message.answer(
             f"Добро пожаловать, {user.full_name}.\n\n"
+            f"Роль: {role_text(user.role)}\n"
             f"Смена №{user.shift_number}",
             reply_markup=main_keyboard,
         )
@@ -127,96 +197,123 @@ async def cmd_start(
 async def start_work(
     message: Message,
 ):
+    await handle_work_start(message, is_overtime=False)
+
+
+@router.message(F.text == "🕒 Подработка")
+async def start_overtime_work(
+    message: Message,
+):
+    await handle_work_start(message, is_overtime=True)
+
+
+async def handle_work_start(
+    message: Message,
+    is_overtime: bool,
+):
     user = await user_service.get_by_telegram_id(
         message.from_user.id
     )
+    user = await ensure_admin_role(user)
 
     if user is None:
-        await message.answer(
-            "Сначала зарегистрируйтесь."
-        )
+        await message.answer("Сначала зарегистрируйтесь.")
         return
 
     active = await shift_service.get_active_shift()
 
     if active is None:
-        if user.role == UserRole.MECHANIC:
+        if user.role in (UserRole.ADMIN, UserRole.MECHANIC):
             await message.answer(
                 "Смена еще не открыта.",
-                reply_markup=shift_open_keyboard,
+                reply_markup=shift_open_keyboard(is_overtime),
             )
             return
 
         await message.answer(
             "Смена еще не открыта.\n"
-            "Дождитесь наладчика."
+            "Дождитесь наладчика или админа."
+        )
+        return
+
+    if (
+        not is_overtime
+        and user.role != UserRole.ADMIN
+        and user.shift_number != active.shift_number
+    ):
+        await message.answer(
+            f"Сейчас открыта смена №{active.shift_number}, "
+            f"а Ваша смена №{user.shift_number}.\n\n"
+            "Если выходите не в свою смену, нажмите «🕒 Подработка»."
+        )
+        return
+
+    if user.role == UserRole.ADMIN:
+        await message.answer(
+            "✅ Админ-режим активен.\n\n"
+            f"Открыта смена №{active.shift_number}."
         )
         return
 
     if user.role == UserRole.MECHANIC:
-        assigned = await shift_mechanic_service.get_by_shift_and_user(
-            active.id,
-            user.id,
-        )
-
-        if assigned:
-            mechanic_type_text = (
-                "основной"
-                if assigned.mechanic_type == MechanicType.MAIN
-                else "вспомогательный"
-            )
-            await message.answer(
-                "✅ Вы уже отмечены в смене.\n\n"
-                f"Смена №{active.shift_number}\n"
-                f"Статус: {mechanic_type_text}"
-            )
-            return
-
-        await message.answer(
-            "Выберите статус наладчика в этой смене:",
-            reply_markup=mechanic_type_keyboard,
+        await prompt_mechanic_status(
+            message,
+            active,
+            user,
+            is_overtime,
         )
         return
 
     active_work = await work_session_service.get_active(user.id)
 
     if active_work:
+        overtime_text = "\nПодработка: да" if active_work.is_overtime else ""
         await message.answer(
             "✅ Вы уже приступили к работе.\n\n"
             f"Станок: {active_work.machine.name}"
+            f"{overtime_text}"
         )
         return
 
     await message.answer(
         "Выберите станок:",
-        reply_markup=await machines_keyboard(),
+        reply_markup=await machines_keyboard(is_overtime),
     )
 
 
-@router.callback_query(F.data == "open_shift")
+@router.callback_query(F.data.startswith("open_shift:"))
 async def open_shift(
     callback: CallbackQuery,
 ):
     user = await user_service.get_by_telegram_id(
         callback.from_user.id
     )
+    user = await ensure_admin_role(user)
 
     if user is None:
-        await callback.message.answer(
-            "Сначала зарегистрируйтесь."
-        )
+        await callback.message.answer("Сначала зарегистрируйтесь.")
         await callback.answer()
         return
 
-    ok, text = await shift_service.start_shift(user)
+    is_overtime = callback.data.endswith(":1")
+    ok, text = await shift_service.start_shift(
+        user,
+        allow_overtime=is_overtime,
+    )
 
     await callback.message.answer(text)
 
-    if ok:
-        await callback.message.answer(
-            "Выберите статус наладчика в этой смене:",
-            reply_markup=mechanic_type_keyboard,
+    if ok and user.role == UserRole.MECHANIC:
+        active = await shift_service.get_active_shift()
+        await prompt_mechanic_status(
+            callback.message,
+            active,
+            user,
+            is_overtime,
         )
+
+    if ok and user.role == UserRole.ADMIN:
+        await callback.message.answer("✅ Админ-режим активен.")
 
     await callback.answer()
 
@@ -228,6 +325,7 @@ async def select_mechanic_type(
     user = await user_service.get_by_telegram_id(
         callback.from_user.id
     )
+    user = await ensure_admin_role(user)
     active = await shift_service.get_active_shift()
 
     if user is None or active is None:
@@ -244,20 +342,29 @@ async def select_mechanic_type(
         await callback.answer()
         return
 
+    _, mechanic_type_raw, overtime_raw = callback.data.split(":")
     mechanic_type = (
         MechanicType.MAIN
-        if callback.data.endswith(":main")
+        if mechanic_type_raw == "main"
         else MechanicType.ASSISTANT
+    )
+    is_overtime = overtime_raw == "1"
+
+    existing = await shift_mechanic_service.get_by_shift_and_user(
+        active.id,
+        user.id,
     )
 
     if mechanic_type == MechanicType.MAIN:
-        existing = await shift_mechanic_service.get_by_shift_and_user(
+        main_count = await shift_mechanic_service.count_main(
             active.id,
-            user.id,
+            exclude_user_id=user.id,
         )
-        main_count = await shift_mechanic_service.count_main(active.id)
 
-        if existing is None and main_count >= 2:
+        if (
+            existing is None
+            or existing.mechanic_type != MechanicType.MAIN
+        ) and main_count >= 2:
             await callback.message.answer(
                 "В смене уже отмечены два основных наладчика."
             )
@@ -268,18 +375,16 @@ async def select_mechanic_type(
         active.id,
         user.id,
         mechanic_type,
+        is_overtime=is_overtime,
     )
 
-    mechanic_type_text = (
-        "основной"
-        if mechanic_type == MechanicType.MAIN
-        else "вспомогательный"
-    )
+    overtime_text = "\nПодработка: да" if is_overtime else ""
 
     await callback.message.answer(
         "✅ Статус наладчика сохранен.\n\n"
         f"Смена №{active.shift_number}\n"
-        f"Статус: {mechanic_type_text}"
+        f"Статус: {mechanic_status_text(mechanic_type)}"
+        f"{overtime_text}"
     )
     await callback.answer()
 
@@ -291,6 +396,7 @@ async def select_machine(
     user = await user_service.get_by_telegram_id(
         callback.from_user.id
     )
+    user = await ensure_admin_role(user)
     active = await shift_service.get_active_shift()
 
     if user is None or active is None:
@@ -301,18 +407,30 @@ async def select_machine(
         return
 
     if user.role != UserRole.OPERATOR:
+        await callback.message.answer("Станок выбирает оператор.")
+        await callback.answer()
+        return
+
+    _, machine_id_raw, overtime_raw = callback.data.split(":")
+    is_overtime = overtime_raw == "1"
+
+    if (
+        not is_overtime
+        and user.shift_number != active.shift_number
+    ):
         await callback.message.answer(
-            "Станок выбирает оператор."
+            f"Сейчас открыта смена №{active.shift_number}, "
+            f"а Ваша смена №{user.shift_number}.\n\n"
+            "Если выходите не в свою смену, нажмите «🕒 Подработка»."
         )
         await callback.answer()
         return
 
-    machine_id = int(callback.data.split(":", maxsplit=1)[1])
-
     ok, text = await work_session_service.start(
         user,
         active,
-        machine_id,
+        int(machine_id_raw),
+        is_overtime=is_overtime,
     )
 
     await callback.message.answer(
@@ -328,9 +446,7 @@ async def start_registration(
 ):
     await state.set_state(RegisterState.full_name)
 
-    await message.answer(
-        "Введите Ваше ФИО."
-    )
+    await message.answer("Введите Ваше ФИО.")
 
 
 @router.message(RegisterState.full_name)
@@ -338,17 +454,14 @@ async def input_name(
     message: Message,
     state: FSMContext,
 ):
-    await state.update_data(
-        full_name=message.text.strip()
-    )
-
-    await state.set_state(
-        RegisterState.role
-    )
+    await state.update_data(full_name=message.text.strip())
+    await state.set_state(RegisterState.role)
 
     await message.answer(
         "Выберите должность:",
-        reply_markup=role_keyboard,
+        reply_markup=registration_role_keyboard(
+            is_admin_id(message.from_user.id)
+        ),
     )
 
 
@@ -357,23 +470,18 @@ async def input_role(
     message: Message,
     state: FSMContext,
 ):
-    if message.text == "🔧 Наладчик":
+    if message.text == "🛠 Админ / мастер" and is_admin_id(message.from_user.id):
+        role = UserRole.ADMIN
+    elif message.text == "🔧 Наладчик":
         role = UserRole.MECHANIC
     elif message.text == "👷 Оператор":
         role = UserRole.OPERATOR
     else:
-        await message.answer(
-            "Выберите должность кнопкой."
-        )
+        await message.answer("Выберите должность кнопкой.")
         return
 
-    await state.update_data(
-        role=role
-    )
-
-    await state.set_state(
-        RegisterState.shift
-    )
+    await state.update_data(role=role)
+    await state.set_state(RegisterState.shift)
 
     await message.answer(
         "Выберите свою смену:",
@@ -386,15 +494,8 @@ async def input_shift(
     message: Message,
     state: FSMContext,
 ):
-    if message.text not in (
-        "1",
-        "2",
-        "3",
-        "4",
-    ):
-        await message.answer(
-            "Выберите смену кнопкой."
-        )
+    if message.text not in ("1", "2", "3", "4"):
+        await message.answer("Выберите смену кнопкой.")
         return
 
     data = await state.get_data()
@@ -411,6 +512,7 @@ async def input_shift(
     await message.answer(
         "✅ Регистрация завершена.\n\n"
         f"ФИО: {user.full_name}\n"
+        f"Роль: {role_text(user.role)}\n"
         f"Смена №{user.shift_number}",
         reply_markup=main_keyboard,
     )

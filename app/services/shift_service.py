@@ -28,6 +28,7 @@ class ShiftService:
     async def start_shift(
         self,
         user: User,
+        allow_overtime: bool = False,
     ) -> tuple[bool, str]:
 
         active = await self.get_active_shift()
@@ -40,22 +41,21 @@ class ShiftService:
 
         resolved = resolve_shift()
 
-        if (
-            user.role != UserRole.MECHANIC
-            and user.shift_number != resolved.shift_number
-        ):
+        if user.role == UserRole.OPERATOR:
             return (
                 False,
-                f"Сейчас работает смена №{resolved.shift_number}."
+                "Смену открывает наладчик или админ/мастер."
             )
 
         if (
             user.role == UserRole.MECHANIC
             and user.shift_number != resolved.shift_number
+            and not allow_overtime
         ):
             return (
                 False,
-                "По графику сейчас не Ваша смена."
+                f"Сейчас работает смена №{resolved.shift_number}.\n"
+                "Если выходите на подработку, нажмите кнопку «🕒 Подработка»."
             )
 
         async with SessionLocal() as session:

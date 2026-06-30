@@ -1,6 +1,6 @@
 from enum import Enum
 
-from sqlalchemy import Enum as SqlEnum, ForeignKey
+from sqlalchemy import Boolean, Enum as SqlEnum, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import BaseModel
@@ -26,5 +26,11 @@ class ShiftMechanic(BaseModel):
 
     mechanic_type: Mapped[MechanicType] = mapped_column(
         SqlEnum(MechanicType),
+        nullable=False,
+    )
+
+    is_overtime: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
         nullable=False,
     )
