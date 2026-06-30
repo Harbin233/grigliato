@@ -7,6 +7,7 @@ from app.db.base import BaseModel
 
 
 class UserRole(str, Enum):
+    ADMIN = "ADMIN"
     OPERATOR = "OPERATOR"
     MECHANIC = "MECHANIC"
 

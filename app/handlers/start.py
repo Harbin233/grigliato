@@ -1,13 +1,15 @@
-from datetime import date
-
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
-from app.core.config import settings
-from app.models.shift import ShiftType
 from app.models.user import UserRole
 from app.services.shift_service import shift_service
 from app.services.user_service import user_service
@@ -17,9 +19,7 @@ router = Router()
 
 
 def keyboard(buttons: list[list[str]]) -> ReplyKeyboardMarkup:
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
     return ReplyKeyboardMarkup(
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
         keyboard=[
             [KeyboardButton(text=text) for text in row]
             for row in buttons
@@ -102,7 +102,6 @@ async def start_work(
     active = await shift_service.get_active_shift()
 
     if active is None:
-
         if user.role == UserRole.MECHANIC:
             await message.answer(
                 "Смена еще не открыта.",
@@ -120,6 +119,27 @@ async def start_work(
         "✅ Вы приступили к работе.\n\n"
         f"Открыта смена №{active.shift_number}."
     )
+
+
+@router.callback_query(F.data == "open_shift")
+async def open_shift(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+
+    if user is None:
+        await callback.message.answer(
+            "Сначала зарегистрируйтесь."
+        )
+        await callback.answer()
+        return
+
+    ok, text = await shift_service.start_shift(user)
+
+    await callback.message.answer(text)
+    await callback.answer()
 
 
 @router.message(F.text == "▶ Начать регистрацию")
@@ -160,10 +180,8 @@ async def input_role(
 ):
     if message.text == "🔧 Наладчик":
         role = UserRole.MECHANIC
-
     elif message.text == "👷 Оператор":
         role = UserRole.OPERATOR
-
     else:
         await message.answer(
             "Выберите должность кнопкой."
@@ -217,4 +235,3 @@ async def input_shift(
         f"Смена №{user.shift_number}",
         reply_markup=main_keyboard,
     )
-

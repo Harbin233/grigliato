@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.core.startup import initialize_reference_data
 from app.db.session import engine
 from app.handlers import routers
 
@@ -22,6 +23,9 @@ async def main() -> None:
     try:
         await check_database()
         logger.success("PostgreSQL ........ OK")
+
+        await initialize_reference_data()
+        logger.success("Справочники ...... OK")
     except Exception as error:
         logger.exception(f"Ошибка PostgreSQL: {error}")
         return
