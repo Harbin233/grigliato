@@ -21,6 +21,19 @@ class RailService:
 
             return result.scalars().all()
 
+    async def get_by_class(self, rail_class: str):
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(Rail)
+                .where(
+                    Rail.is_active.is_(True),
+                    Rail.name.startswith(f"{rail_class} "),
+                )
+                .order_by(Rail.name)
+            )
+
+            return result.scalars().all()
+
     async def get(self, rail_id: int):
         async with SessionLocal() as session:
             return await session.get(Rail, rail_id)

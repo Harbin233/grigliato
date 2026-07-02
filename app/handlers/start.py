@@ -140,6 +140,18 @@ def rail_base_name_prompt(rail_class: str) -> str:
     )
 
 
+def rails_list_text(rails, limit: int = 20) -> str:
+    if not rails:
+        return "Пока нет заведённых реек."
+
+    lines = [f"- {rail.name}" for rail in rails[:limit]]
+
+    if len(rails) > limit:
+        lines.append(f"...и ещё {len(rails) - limit}")
+
+    return "\n".join(lines)
+
+
 def rail_name(rail_class: str, rail_shape: str, base_name: str) -> str:
     return f"{rail_class} {rail_shape} {base_name}"
 
@@ -645,9 +657,12 @@ async def admin_mode(
         return
 
     await state.clear()
+    rails = await rail_service.get_all()
     await message.answer(
         "Админ режим.\n\n"
-        "Здесь добавляются новые рейки и ставки по станкам.",
+        "Здесь добавляются новые рейки и ставки по станкам.\n\n"
+        "Уже заведено:\n"
+        f"{rails_list_text(rails)}",
         reply_markup=admin_keyboard,
     )
 
@@ -701,11 +716,14 @@ async def admin_rail_class(
         )
         return
 
+    existing_rails = await rail_service.get_by_class(rail_class)
     await state.update_data(rail_class=rail_class)
     await state.set_state(AdminRailState.rail_shapes)
     await message.answer(
         "Выберите вид рейки.\n\n"
-        "Если цены одинаковые для всех видов, нажмите «Все виды».",
+        "Если цены одинаковые для всех видов, нажмите «Все виды».\n\n"
+        f"Уже есть {rail_class}:\n"
+        f"{rails_list_text(existing_rails)}",
         reply_markup=rail_shape_keyboard(rail_class),
     )
 
@@ -755,6 +773,27 @@ async def admin_rail_name(
     base_name = message.text.strip()
     data = await state.get_data()
     rail_shapes = data["rail_shapes"]
+    existing_target_rails = []
+
+    for rail_shape in rail_shapes:
+        target_name = rail_name(
+            data["rail_class"],
+            rail_shape,
+            base_name,
+        )
+        existing_rail = await rail_service.get_by_name(target_name)
+
+        if existing_rail:
+            existing_target_rails.append(existing_rail)
+
+    if existing_target_rails:
+        await message.answer(
+            "Такая рейка уже есть в справочнике:\n"
+            f"{rails_list_text(existing_target_rails)}\n\n"
+            "Введите другой размер/модель или выберите другой вид рейки.",
+            reply_markup=admin_keyboard,
+        )
+        return
 
     if len(rail_shapes) == 1:
         rail_shape = rail_shapes[0]
