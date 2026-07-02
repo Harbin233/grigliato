@@ -25,6 +25,14 @@ class RailService:
         async with SessionLocal() as session:
             return await session.get(Rail, rail_id)
 
+    async def get_by_name(self, name: str):
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(Rail).where(Rail.name == name)
+            )
+
+            return result.scalar_one_or_none()
+
     async def create(
         self,
         name: str,
@@ -46,6 +54,99 @@ class RailService:
             await session.refresh(rail)
 
             return rail
+
+    async def clone_pair_from_source(self, source_rail_id: int) -> Rail | None:
+        async with SessionLocal() as session:
+            source = await session.get(Rail, source_rail_id)
+
+            if source is None:
+                return None
+
+            parts = source.name.split(" ", maxsplit=2)
+
+            if len(parts) != 3:
+                return None
+
+            rail_class, rail_shape, rail_base_name = parts
+            pair_shape = {
+                "Мама": "Папа",
+                "Папа": "Мама",
+            }.get(rail_shape)
+
+            if pair_shape is None:
+                return None
+
+            pair_name = f"{rail_class} {pair_shape} {rail_base_name}"
+            result = await session.execute(
+                select(Rail).where(Rail.name == pair_name)
+            )
+            target = result.scalar_one_or_none()
+
+            if target is None:
+                target = Rail(
+                    name=pair_name,
+                    length=source.length,
+                    pieces_per_pack=source.pieces_per_pack,
+                    metal=source.metal,
+                    is_active=True,
+                )
+                session.add(target)
+                await session.flush()
+            else:
+                target.length = source.length
+                target.pieces_per_pack = source.pieces_per_pack
+                target.metal = source.metal
+                target.is_active = True
+
+            source_rates = (
+                await session.execute(
+                    select(MachineRail).where(
+                        MachineRail.rail_id == source.id
+                    )
+                )
+            ).scalars().all()
+            existing_target_rates = {
+                row.machine_id: row
+                for row in (
+                    await session.execute(
+                        select(MachineRail).where(
+                            MachineRail.rail_id == target.id
+                        )
+                    )
+                ).scalars().all()
+            }
+            source_machine_ids = {
+                source_rate.machine_id
+                for source_rate in source_rates
+            }
+
+            for source_rate in source_rates:
+                target_rate = existing_target_rates.get(source_rate.machine_id)
+
+                if target_rate:
+                    target_rate.operator_price = source_rate.operator_price
+                    target_rate.mechanic_price = source_rate.mechanic_price
+                    target_rate.is_enabled = source_rate.is_enabled
+                    continue
+
+                session.add(
+                    MachineRail(
+                        machine_id=source_rate.machine_id,
+                        rail_id=target.id,
+                        operator_price=source_rate.operator_price,
+                        mechanic_price=source_rate.mechanic_price,
+                        is_enabled=source_rate.is_enabled,
+                    )
+                )
+
+            for machine_id, target_rate in existing_target_rates.items():
+                if machine_id not in source_machine_ids:
+                    target_rate.is_enabled = False
+
+            await session.commit()
+            await session.refresh(target)
+
+            return target
 
     async def create_with_rates_for_all_machines(
         self,

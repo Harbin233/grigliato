@@ -68,6 +68,11 @@ RAIL_CLASSES = {
     "GL": ["Мама", "Папа", "L"],
 }
 
+PAIR_RAIL_SHAPES = {
+    "Мама": "Папа",
+    "Папа": "Мама",
+}
+
 
 def parse_decimal(text: str) -> Decimal | None:
     try:
@@ -114,6 +119,32 @@ def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
     rows.append(["↩️ Назад"])
 
     return keyboard(rows)
+
+
+def rail_name(rail_class: str, rail_shape: str, base_name: str) -> str:
+    return f"{rail_class} {rail_shape} {base_name}"
+
+
+def split_rail_name(name: str) -> tuple[str, str, str] | None:
+    parts = name.split(" ", maxsplit=2)
+
+    if len(parts) != 3:
+        return None
+
+    return parts[0], parts[1], parts[2]
+
+
+def create_pair_keyboard(source_rail_id: int, pair_shape: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Создать {pair_shape} с теми же параметрами",
+                    callback_data=f"rail_pair:{source_rail_id}",
+                )
+            ]
+        ]
+    )
 
 
 def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
@@ -282,6 +313,13 @@ async def finish_admin_rail(
     enabled_count = len(data["machine_rates"])
     skipped_count = len(data["machines"]) - enabled_count
     names_text = "\n".join(f"- {rail.name}" for rail in rails)
+    pair_shape = None
+
+    if len(rails) == 1:
+        rail_parts = split_rail_name(rails[0].name)
+
+        if rail_parts:
+            pair_shape = PAIR_RAIL_SHAPES.get(rail_parts[1])
 
     await state.clear()
     await message.answer(
@@ -293,6 +331,17 @@ async def finish_admin_rail(
         f"Пропущено станков: {skipped_count}",
         reply_markup=admin_keyboard,
     )
+
+    if pair_shape:
+        _, _, base_name = split_rail_name(rails[0].name)
+        pair_name = rail_name(data["rail_class"], pair_shape, base_name)
+        existing_pair = await rail_service.get_by_name(pair_name)
+
+        if existing_pair is None:
+            await message.answer(
+                f"Можно сразу добавить парную рейку: {pair_name}.",
+                reply_markup=create_pair_keyboard(rails[0].id, pair_shape),
+            )
 
 
 async def ensure_admin_role(user):
@@ -607,7 +656,41 @@ async def admin_rail_name(
         await back_to_main(message, state)
         return
 
-    await state.update_data(name=message.text.strip())
+    base_name = message.text.strip()
+    data = await state.get_data()
+    rail_shapes = data["rail_shapes"]
+
+    if len(rail_shapes) == 1:
+        rail_shape = rail_shapes[0]
+        pair_shape = PAIR_RAIL_SHAPES.get(rail_shape)
+
+        if pair_shape:
+            pair_name = rail_name(data["rail_class"], pair_shape, base_name)
+            existing_pair = await rail_service.get_by_name(pair_name)
+
+            if existing_pair:
+                rail = await rail_service.clone_pair_from_source(
+                    existing_pair.id
+                )
+                await state.clear()
+
+                if rail is None:
+                    await message.answer(
+                        "Не получилось скопировать парную рейку. "
+                        "Попробуйте добавить вручную.",
+                        reply_markup=admin_keyboard,
+                    )
+                    return
+
+                await message.answer(
+                    "✅ Рейка создана из парной без повторного ввода цен.\n\n"
+                    f"Источник: {existing_pair.name}\n"
+                    f"Создано: {rail.name}",
+                    reply_markup=admin_keyboard,
+                )
+                return
+
+    await state.update_data(name=base_name)
     await state.set_state(AdminRailState.length)
     await message.answer(
         "Введите длину одной штуки в метрах.\n\n"
@@ -721,6 +804,37 @@ async def admin_rail_machine_rate(
         machine_rates=machine_rates,
     )
     await prompt_next_machine_rate(message, state)
+
+
+@router.callback_query(F.data.startswith("rail_pair:"))
+async def create_rail_pair(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник реек ведет админ/мастер.")
+        await callback.answer()
+        return
+
+    source_rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    rail = await rail_service.clone_pair_from_source(source_rail_id)
+
+    if rail is None:
+        await callback.message.answer(
+            "Не получилось создать парную рейку. "
+            "Проверьте название исходной рейки."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "✅ Парная рейка создана с теми же параметрами и ставками.\n\n"
+        f"Создано: {rail.name}",
+        reply_markup=admin_keyboard,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("prod_machine:"))
