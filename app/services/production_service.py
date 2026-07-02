@@ -21,6 +21,10 @@ def meters(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
 
 
+def whole_meters(value: Decimal) -> int:
+    return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 class ProductionService:
     async def get_enabled_rails_for_machine(
         self,

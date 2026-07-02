@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -14,11 +16,13 @@ from app.core.config import settings
 from app.models.shift_mechanic import MechanicType
 from app.models.user import UserRole
 from app.services.machine_service import machine_service
-from app.services.production_service import production_service
+from app.services.production_service import production_service, whole_meters
+from app.services.rail_service import rail_service
 from app.services.shift_mechanic_service import shift_mechanic_service
 from app.services.shift_service import shift_service
 from app.services.user_service import user_service
 from app.services.work_session_service import work_session_service
+from app.states.admin import AdminRailState
 from app.states.production import ProductionState
 from app.states.register import RegisterState
 
@@ -59,6 +63,13 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
     return keyboard(buttons)
 
 
+def parse_decimal(text: str) -> Decimal | None:
+    try:
+        return Decimal(text.strip().replace(",", "."))
+    except (InvalidOperation, AttributeError):
+        return None
+
+
 start_keyboard = keyboard([
     ["▶ Начать регистрацию"],
 ])
@@ -70,7 +81,13 @@ shift_keyboard = keyboard([
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
     ["➕ Добавить продукцию"],
+    ["⚙️ Админ режим"],
     ["🕒 Подработка"],
+])
+
+admin_keyboard = keyboard([
+    ["➕ Добавить рейку"],
+    ["↩️ Назад"],
 ])
 
 
@@ -352,6 +369,185 @@ async def add_production(
     )
 
 
+@router.message(F.text == "⚙️ Админ режим")
+async def admin_mode(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await message.answer("Админ-режим доступен только админу/мастеру.")
+        return
+
+    await state.clear()
+    await message.answer(
+        "Админ режим.\n\n"
+        "Сейчас доступно ведение справочника реек.",
+        reply_markup=admin_keyboard,
+    )
+
+
+@router.message(F.text == "↩️ Назад")
+async def back_to_main(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "Главное меню.",
+        reply_markup=main_keyboard,
+    )
+
+
+@router.message(F.text == "➕ Добавить рейку")
+async def add_rail_start(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await message.answer("Справочник реек ведет админ/мастер.")
+        return
+
+    await state.set_state(AdminRailState.name)
+    await message.answer(
+        "Введите название рейки.\n\n"
+        "Например: GL15 мама 75x75 h37 b15",
+        reply_markup=admin_keyboard,
+    )
+
+
+@router.message(AdminRailState.name)
+async def admin_rail_name(
+    message: Message,
+    state: FSMContext,
+):
+    if not message.text or message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    await state.update_data(name=message.text.strip())
+    await state.set_state(AdminRailState.length)
+    await message.answer(
+        "Введите длину одной штуки в метрах.\n\n"
+        "Например: 0.6"
+    )
+
+
+@router.message(AdminRailState.length)
+async def admin_rail_length(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    length = parse_decimal(message.text or "")
+
+    if length is None or length <= 0:
+        await message.answer("Введите длину числом, например 0.6")
+        return
+
+    await state.update_data(length=str(length))
+    await state.set_state(AdminRailState.pieces_per_pack)
+    await message.answer(
+        "Введите количество штук в коробке.\n\n"
+        "Например: 312"
+    )
+
+
+@router.message(AdminRailState.pieces_per_pack)
+async def admin_rail_pieces(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    if not message.text or not message.text.strip().isdigit():
+        await message.answer("Введите целое число, например 312")
+        return
+
+    pieces_per_pack = int(message.text.strip())
+
+    if pieces_per_pack <= 0:
+        await message.answer("Количество штук должно быть больше нуля.")
+        return
+
+    await state.update_data(pieces_per_pack=pieces_per_pack)
+    await state.set_state(AdminRailState.operator_price)
+    await message.answer(
+        "Введите ставку оператора за 1000 штук.\n\n"
+        "Например: 199.18"
+    )
+
+
+@router.message(AdminRailState.operator_price)
+async def admin_rail_operator_price(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    operator_price = parse_decimal(message.text or "")
+
+    if operator_price is None or operator_price < 0:
+        await message.answer("Введите ставку числом, например 199.18")
+        return
+
+    await state.update_data(operator_price=str(operator_price))
+    await state.set_state(AdminRailState.mechanic_price)
+    await message.answer(
+        "Введите ставку наладчика за 1000 штук.\n\n"
+        "Например: 93.25"
+    )
+
+
+@router.message(AdminRailState.mechanic_price)
+async def admin_rail_mechanic_price(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    mechanic_price = parse_decimal(message.text or "")
+
+    if mechanic_price is None or mechanic_price < 0:
+        await message.answer("Введите ставку числом, например 93.25")
+        return
+
+    data = await state.get_data()
+    rail = await rail_service.create_with_rates_for_all_machines(
+        name=data["name"],
+        length=Decimal(data["length"]),
+        pieces_per_pack=data["pieces_per_pack"],
+        operator_price=Decimal(data["operator_price"]),
+        mechanic_price=mechanic_price,
+    )
+
+    await state.clear()
+    await message.answer(
+        "✅ Рейка сохранена.\n\n"
+        f"Название: {rail.name}\n"
+        f"Длина штуки: {rail.length} м\n"
+        f"Штук в коробке: {rail.pieces_per_pack}\n"
+        f"Ставка оператора: {data['operator_price']} ₽ / 1000 шт\n"
+        f"Ставка наладчика: {mechanic_price} ₽ / 1000 шт\n\n"
+        "Ставки применены ко всем активным станкам.",
+        reply_markup=admin_keyboard,
+    )
+
+
 @router.callback_query(F.data.startswith("prod_machine:"))
 async def select_production_machine(
     callback: CallbackQuery,
@@ -473,7 +669,7 @@ async def input_production_packs(
         f"Рейка: {rail.name}\n"
         f"Коробок: {entry.packs}\n"
         f"Штук: {entry.pieces}\n"
-        f"Пог. метров: {entry.meters}\n"
+        f"Пог. метров: {whole_meters(Decimal(str(entry.meters)))}\n"
         f"Оператор: {entry.operator_name}\n"
         f"Оператору: {operator_total} ₽\n"
         f"Наладчикам всего: {mechanic_total} ₽"
