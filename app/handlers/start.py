@@ -123,6 +123,23 @@ def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
     return keyboard(rows)
 
 
+def rail_base_name_prompt(rail_class: str) -> str:
+    if rail_class == "GL":
+        return (
+            "Введите модель или размер без класса GL и без вида рейки.\n\n"
+            "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
+            "Например: 15 75x75 h37 b15\n"
+            "или: 75x75 h37 b15"
+        )
+
+    return (
+        "Введите модель или размер без класса Эконом и без вида рейки.\n\n"
+        "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
+        "Например: 50x40x10\n"
+        "или: 60x40x10"
+    )
+
+
 def rail_name(rail_class: str, rail_shape: str, base_name: str) -> str:
     return f"{rail_class} {rail_shape} {base_name}"
 
@@ -721,10 +738,7 @@ async def admin_rail_shapes(
     await state.update_data(rail_shapes=rail_shapes)
     await state.set_state(AdminRailState.name)
     await message.answer(
-        "Введите модель или размер без вида рейки.\n\n"
-        "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
-        "Например: 50x40x10\n"
-        "или: GL15 75x75 h37 b15",
+        rail_base_name_prompt(rail_class),
         reply_markup=admin_keyboard,
     )
 
