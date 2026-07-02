@@ -52,8 +52,7 @@ class RailService:
         name: str,
         length: Decimal,
         pieces_per_pack: int,
-        operator_price: Decimal,
-        mechanic_price: Decimal,
+        machine_rates: list[dict],
     ) -> Rail:
         async with SessionLocal() as session:
             result = await session.execute(
@@ -82,6 +81,10 @@ class RailService:
                 )
             ).scalars().all()
 
+            rates_by_machine_id = {
+                rate["machine_id"]: rate
+                for rate in machine_rates
+            }
             existing_rates = {
                 row.machine_id: row
                 for row in (
@@ -93,19 +96,26 @@ class RailService:
 
             for machine in machines:
                 rate = existing_rates.get(machine.id)
+                new_rate = rates_by_machine_id.get(machine.id)
 
                 if rate:
-                    rate.operator_price = operator_price
-                    rate.mechanic_price = mechanic_price
-                    rate.is_enabled = True
+                    if new_rate is None:
+                        rate.is_enabled = False
+                    else:
+                        rate.operator_price = new_rate["operator_price"]
+                        rate.mechanic_price = new_rate["mechanic_price"]
+                        rate.is_enabled = True
+                    continue
+
+                if new_rate is None:
                     continue
 
                 session.add(
                     MachineRail(
                         machine_id=machine.id,
                         rail_id=rail.id,
-                        operator_price=operator_price,
-                        mechanic_price=mechanic_price,
+                        operator_price=new_rate["operator_price"],
+                        mechanic_price=new_rate["mechanic_price"],
                         is_enabled=True,
                     )
                 )

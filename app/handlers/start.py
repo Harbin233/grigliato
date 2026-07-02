@@ -90,6 +90,11 @@ admin_keyboard = keyboard([
     ["↩️ Назад"],
 ])
 
+admin_skip_keyboard = keyboard([
+    ["⏭ Пропустить"],
+    ["↩️ Назад"],
+])
+
 
 def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     suffix = "1" if is_overtime else "0"
@@ -177,6 +182,86 @@ async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
         )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def parse_machine_rate(text: str) -> tuple[Decimal, Decimal] | None:
+    parts = text.replace(";", " ").replace(",", ".").split()
+
+    if len(parts) != 2:
+        return None
+
+    operator_price = parse_decimal(parts[0])
+    mechanic_price = parse_decimal(parts[1])
+
+    if (
+        operator_price is None
+        or mechanic_price is None
+        or operator_price < 0
+        or mechanic_price < 0
+    ):
+        return None
+
+    return operator_price, mechanic_price
+
+
+async def prompt_next_machine_rate(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    machines = data["machines"]
+    machine_index = data["machine_index"]
+
+    if machine_index >= len(machines):
+        await finish_admin_rail(message, state)
+        return
+
+    machine = machines[machine_index]
+    await state.set_state(AdminRailState.machine_rate)
+    await message.answer(
+        f"Станок: {machine['name']}\n\n"
+        "Введите ставки за 1000 штук через пробел:\n"
+        "оператор наладчик\n\n"
+        "Например: 199.18 93.25\n\n"
+        "Если на этом станке рейка не производится, нажмите "
+        "«⏭ Пропустить».",
+        reply_markup=admin_skip_keyboard,
+    )
+
+
+async def finish_admin_rail(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+
+    rail = await rail_service.create_with_rates_for_all_machines(
+        name=data["name"],
+        length=Decimal(data["length"]),
+        pieces_per_pack=data["pieces_per_pack"],
+        machine_rates=[
+            {
+                "machine_id": rate["machine_id"],
+                "operator_price": Decimal(rate["operator_price"]),
+                "mechanic_price": Decimal(rate["mechanic_price"]),
+            }
+            for rate in data["machine_rates"]
+        ],
+    )
+
+    enabled_count = len(data["machine_rates"])
+    skipped_count = len(data["machines"]) - enabled_count
+
+    await state.clear()
+    await message.answer(
+        "✅ Рейка сохранена.\n\n"
+        f"Название: {rail.name}\n"
+        f"Длина штуки: {rail.length} м\n"
+        f"Штук в коробке: {rail.pieces_per_pack}\n"
+        f"Станков с ценой: {enabled_count}\n"
+        f"Пропущено станков: {skipped_count}",
+        reply_markup=admin_keyboard,
+    )
 
 
 async def ensure_admin_role(user):
@@ -480,72 +565,70 @@ async def admin_rail_pieces(
         await message.answer("Количество штук должно быть больше нуля.")
         return
 
-    await state.update_data(pieces_per_pack=pieces_per_pack)
-    await state.set_state(AdminRailState.operator_price)
-    await message.answer(
-        "Введите ставку оператора за 1000 штук.\n\n"
-        "Например: 199.18"
+    machines = await machine_service.get_all()
+
+    if not machines:
+        await message.answer("Нет активных станков для назначения цен.")
+        await state.clear()
+        return
+
+    await state.update_data(
+        pieces_per_pack=pieces_per_pack,
+        machines=[
+            {
+                "id": machine.id,
+                "name": machine.name,
+            }
+            for machine in machines
+        ],
+        machine_index=0,
+        machine_rates=[],
     )
+    await prompt_next_machine_rate(message, state)
 
 
-@router.message(AdminRailState.operator_price)
-async def admin_rail_operator_price(
+@router.message(AdminRailState.machine_rate)
+async def admin_rail_machine_rate(
     message: Message,
     state: FSMContext,
 ):
     if message.text == "↩️ Назад":
         await back_to_main(message, state)
-        return
-
-    operator_price = parse_decimal(message.text or "")
-
-    if operator_price is None or operator_price < 0:
-        await message.answer("Введите ставку числом, например 199.18")
-        return
-
-    await state.update_data(operator_price=str(operator_price))
-    await state.set_state(AdminRailState.mechanic_price)
-    await message.answer(
-        "Введите ставку наладчика за 1000 штук.\n\n"
-        "Например: 93.25"
-    )
-
-
-@router.message(AdminRailState.mechanic_price)
-async def admin_rail_mechanic_price(
-    message: Message,
-    state: FSMContext,
-):
-    if message.text == "↩️ Назад":
-        await back_to_main(message, state)
-        return
-
-    mechanic_price = parse_decimal(message.text or "")
-
-    if mechanic_price is None or mechanic_price < 0:
-        await message.answer("Введите ставку числом, например 93.25")
         return
 
     data = await state.get_data()
-    rail = await rail_service.create_with_rates_for_all_machines(
-        name=data["name"],
-        length=Decimal(data["length"]),
-        pieces_per_pack=data["pieces_per_pack"],
-        operator_price=Decimal(data["operator_price"]),
-        mechanic_price=mechanic_price,
+    machines = data["machines"]
+    machine_index = data["machine_index"]
+
+    if message.text == "⏭ Пропустить":
+        await state.update_data(machine_index=machine_index + 1)
+        await prompt_next_machine_rate(message, state)
+        return
+
+    prices = parse_machine_rate(message.text or "")
+
+    if prices is None:
+        await message.answer(
+            "Введите две ставки через пробел, например 199.18 93.25,\n"
+            "или нажмите «⏭ Пропустить»."
+        )
+        return
+
+    operator_price, mechanic_price = prices
+    machine_rates = data["machine_rates"]
+    machine_rates.append(
+        {
+            "machine_id": machines[machine_index]["id"],
+            "operator_price": str(operator_price),
+            "mechanic_price": str(mechanic_price),
+        }
     )
 
-    await state.clear()
-    await message.answer(
-        "✅ Рейка сохранена.\n\n"
-        f"Название: {rail.name}\n"
-        f"Длина штуки: {rail.length} м\n"
-        f"Штук в коробке: {rail.pieces_per_pack}\n"
-        f"Ставка оператора: {data['operator_price']} ₽ / 1000 шт\n"
-        f"Ставка наладчика: {mechanic_price} ₽ / 1000 шт\n\n"
-        "Ставки применены ко всем активным станкам.",
-        reply_markup=admin_keyboard,
+    await state.update_data(
+        machine_index=machine_index + 1,
+        machine_rates=machine_rates,
     )
+    await prompt_next_machine_rate(message, state)
 
 
 @router.callback_query(F.data.startswith("prod_machine:"))
