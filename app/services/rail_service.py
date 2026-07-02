@@ -188,6 +188,88 @@ class RailService:
 
         return await self.clone_shape_from_source(source_rail_id, pair_shape)
 
+    async def create_with_rates_copied_from_rail(
+        self,
+        name: str,
+        length: Decimal,
+        pieces_per_pack: int,
+        source_rail_id: int,
+    ) -> Rail | None:
+        async with SessionLocal() as session:
+            source = await session.get(Rail, source_rail_id)
+
+            if source is None:
+                return None
+
+            result = await session.execute(
+                select(Rail).where(Rail.name == name)
+            )
+            rail = result.scalar_one_or_none()
+
+            if rail is None:
+                rail = Rail(
+                    name=name,
+                    length=length,
+                    pieces_per_pack=pieces_per_pack,
+                    metal=source.metal,
+                    is_active=True,
+                )
+                session.add(rail)
+                await session.flush()
+            else:
+                rail.length = length
+                rail.pieces_per_pack = pieces_per_pack
+                rail.metal = source.metal
+                rail.is_active = True
+
+            source_rates = (
+                await session.execute(
+                    select(MachineRail).where(
+                        MachineRail.rail_id == source.id
+                    )
+                )
+            ).scalars().all()
+            existing_rates = {
+                row.machine_id: row
+                for row in (
+                    await session.execute(
+                        select(MachineRail).where(MachineRail.rail_id == rail.id)
+                    )
+                ).scalars().all()
+            }
+            source_machine_ids = {
+                source_rate.machine_id
+                for source_rate in source_rates
+            }
+
+            for source_rate in source_rates:
+                rate = existing_rates.get(source_rate.machine_id)
+
+                if rate:
+                    rate.operator_price = source_rate.operator_price
+                    rate.mechanic_price = source_rate.mechanic_price
+                    rate.is_enabled = source_rate.is_enabled
+                    continue
+
+                session.add(
+                    MachineRail(
+                        machine_id=source_rate.machine_id,
+                        rail_id=rail.id,
+                        operator_price=source_rate.operator_price,
+                        mechanic_price=source_rate.mechanic_price,
+                        is_enabled=source_rate.is_enabled,
+                    )
+                )
+
+            for machine_id, rate in existing_rates.items():
+                if machine_id not in source_machine_ids:
+                    rate.is_enabled = False
+
+            await session.commit()
+            await session.refresh(rail)
+
+            return rail
+
     async def create_with_rates_for_all_machines(
         self,
         name: str,

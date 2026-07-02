@@ -25,6 +25,19 @@ def whole_meters(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def guide_pay_multiplier(rail: Rail, rail_length: Decimal) -> int:
+    if not rail.name.startswith("Эконом Напр "):
+        return 1
+
+    if rail_length == Decimal("1.200"):
+        return 2
+
+    if rail_length == Decimal("2.400"):
+        return 4
+
+    return 1
+
+
 class ProductionService:
     async def get_enabled_rails(self) -> list[Rail]:
         async with SessionLocal() as session:
@@ -84,7 +97,7 @@ class ProductionService:
         machine_rail_id: int,
         packs: int,
         created_by: User,
-    ) -> tuple[ProductionEntry, Machine, Rail, Decimal, Decimal]:
+    ) -> tuple[ProductionEntry, Machine, Rail, Decimal, Decimal, int]:
         async with SessionLocal() as session:
             machine_rail = await session.get(
                 MachineRail,
@@ -118,10 +131,15 @@ class ProductionService:
             rail_length = Decimal(str(rail.length))
             operator_price = Decimal(str(machine_rail.operator_price))
             mechanic_price = Decimal(str(machine_rail.mechanic_price))
+            payable_pieces = pieces * guide_pay_multiplier(rail, rail_length)
 
             total_meters = meters(Decimal(pieces) * rail_length)
-            operator_total = money(Decimal(pieces) / Decimal(1000) * operator_price)
-            mechanic_total = money(Decimal(pieces) / Decimal(1000) * mechanic_price)
+            operator_total = money(
+                Decimal(payable_pieces) / Decimal(1000) * operator_price
+            )
+            mechanic_total = money(
+                Decimal(payable_pieces) / Decimal(1000) * mechanic_price
+            )
 
             entry = ProductionEntry(
                 shift_id=shift.id,
@@ -151,6 +169,7 @@ class ProductionService:
                 rail,
                 operator_total,
                 mechanic_total,
+                payable_pieces,
             )
 
 

@@ -179,6 +179,18 @@ def rail_name(rail_class: str, rail_shape: str, base_name: str) -> str:
     return f"{rail_class} {rail_shape} {base_name}"
 
 
+def catalog_rail_name(
+    rail_class: str,
+    rail_shape: str,
+    base_name: str,
+    length: str | None = None,
+) -> str:
+    if rail_class == "Эконом" and rail_shape == "Напр" and length:
+        return f"{rail_class} {rail_shape} {base_name} {length}м"
+
+    return rail_name(rail_class, rail_shape, base_name)
+
+
 def split_rail_name(name: str) -> tuple[str, str, str] | None:
     parts = name.split(" ", maxsplit=2)
 
@@ -408,7 +420,12 @@ async def finish_admin_rail(
 ) -> None:
     data = await state.get_data()
     rail_names = [
-        f"{data['rail_class']} {shape} {data['name']}"
+        catalog_rail_name(
+            data["rail_class"],
+            shape,
+            data["name"],
+            data["length"],
+        )
         for shape in data["rail_shapes"]
     ]
     machine_rates = [
@@ -806,16 +823,17 @@ async def admin_rail_name(
     rail_shapes = data["rail_shapes"]
     existing_target_rails = []
 
-    for rail_shape in rail_shapes:
-        target_name = rail_name(
-            data["rail_class"],
-            rail_shape,
-            base_name,
-        )
-        existing_rail = await rail_service.get_by_name(target_name)
+    if not (data["rail_class"] == "Эконом" and rail_shapes == ["Напр"]):
+        for rail_shape in rail_shapes:
+            target_name = catalog_rail_name(
+                data["rail_class"],
+                rail_shape,
+                base_name,
+            )
+            existing_rail = await rail_service.get_by_name(target_name)
 
-        if existing_rail:
-            existing_target_rails.append(existing_rail)
+            if existing_rail:
+                existing_target_rails.append(existing_rail)
 
     if existing_target_rails:
         await message.answer(
@@ -906,6 +924,24 @@ async def admin_rail_length(
         await message.answer("Введите длину числом, например 0.6")
         return
 
+    if data.get("rail_class") == "Эконом" and data.get("rail_shapes") == ["Напр"]:
+        target_name = catalog_rail_name(
+            data["rail_class"],
+            "Напр",
+            data["name"],
+            text,
+        )
+        existing_rail = await rail_service.get_by_name(target_name)
+
+        if existing_rail:
+            await message.answer(
+                "Такая направляющая уже есть в справочнике:\n"
+                f"- {existing_rail.name}\n\n"
+                "Выберите другую длину или введите другой размер/модель.",
+                reply_markup=econom_guide_length_keyboard,
+            )
+            return
+
     await state.update_data(length=str(length))
     await state.set_state(AdminRailState.pieces_per_pack)
     await message.answer(
@@ -932,6 +968,52 @@ async def admin_rail_pieces(
     if pieces_per_pack <= 0:
         await message.answer("Количество штук должно быть больше нуля.")
         return
+
+    data = await state.get_data()
+
+    if data.get("rail_class") == "Эконом" and data.get("rail_shapes") == ["Напр"]:
+        source_rail = None
+
+        for source_shape in ("Мама", "Папа"):
+            source_rail = await rail_service.get_by_name(
+                rail_name("Эконом", source_shape, data["name"])
+            )
+
+            if source_rail:
+                break
+
+        if source_rail:
+            rail = await rail_service.create_with_rates_copied_from_rail(
+                name=catalog_rail_name(
+                    "Эконом",
+                    "Напр",
+                    data["name"],
+                    data["length"],
+                ),
+                length=Decimal(data["length"]),
+                pieces_per_pack=pieces_per_pack,
+                source_rail_id=source_rail.id,
+            )
+
+            await state.clear()
+
+            if rail is None:
+                await message.answer(
+                    "Не получилось скопировать ставки. "
+                    "Попробуйте добавить направляющую вручную.",
+                    reply_markup=admin_keyboard,
+                )
+                return
+
+            await message.answer(
+                "✅ Направляющая сохранена со ставками от эконом рейки.\n\n"
+                f"Источник ставок: {source_rail.name}\n"
+                f"Создано: {rail.name}\n"
+                f"Длина: {rail.length} м\n"
+                f"Штук в коробке: {rail.pieces_per_pack}",
+                reply_markup=admin_keyboard,
+            )
+            return
 
     machines = await machine_service.get_all()
 
@@ -1234,7 +1316,14 @@ async def input_production_packs(
     data = await state.get_data()
 
     try:
-        entry, machine, rail, operator_total, mechanic_total = (
+        (
+            entry,
+            machine,
+            rail,
+            operator_total,
+            mechanic_total,
+            payable_pieces,
+        ) = (
             await production_service.create_entry(
                 shift=active,
                 machine_id=data["machine_id"],
@@ -1249,6 +1338,11 @@ async def input_production_packs(
         return
 
     await state.clear()
+    payable_text = (
+        f"Расчетных штук: {payable_pieces}\n"
+        if payable_pieces != entry.pieces
+        else ""
+    )
 
     await message.answer(
         "✅ Продукция добавлена.\n\n"
@@ -1257,6 +1351,7 @@ async def input_production_packs(
         f"Рейка: {rail.name}\n"
         f"Коробок: {entry.packs}\n"
         f"Штук: {entry.pieces}\n"
+        f"{payable_text}"
         f"Пог. метров: {whole_meters(Decimal(str(entry.meters)))}\n"
         f"Оператор: {entry.operator_name}\n"
         f"Оператору: {operator_total} ₽\n"
