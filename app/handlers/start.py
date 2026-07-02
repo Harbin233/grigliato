@@ -63,6 +63,12 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
     return keyboard(buttons)
 
 
+RAIL_CLASSES = {
+    "Эконом": ["Мама", "Папа"],
+    "GL": ["Мама", "Папа", "L"],
+}
+
+
 def parse_decimal(text: str) -> Decimal | None:
     try:
         return Decimal(text.strip().replace(",", "."))
@@ -94,6 +100,20 @@ admin_skip_keyboard = keyboard([
     ["⏭ Пропустить"],
     ["↩️ Назад"],
 ])
+
+rail_class_keyboard = keyboard([
+    ["Эконом", "GL"],
+    ["↩️ Назад"],
+])
+
+
+def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
+    shapes = RAIL_CLASSES[rail_class]
+    rows = [[shape] for shape in shapes]
+    rows.append(["Все виды"])
+    rows.append(["↩️ Назад"])
+
+    return keyboard(rows)
 
 
 def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
@@ -234,30 +254,41 @@ async def finish_admin_rail(
     state: FSMContext,
 ) -> None:
     data = await state.get_data()
+    rail_names = [
+        f"{data['rail_class']} {shape} {data['name']}"
+        for shape in data["rail_shapes"]
+    ]
+    machine_rates = [
+        {
+            "machine_id": rate["machine_id"],
+            "operator_price": Decimal(rate["operator_price"]),
+            "mechanic_price": Decimal(rate["mechanic_price"]),
+        }
+        for rate in data["machine_rates"]
+    ]
 
-    rail = await rail_service.create_with_rates_for_all_machines(
-        name=data["name"],
-        length=Decimal(data["length"]),
-        pieces_per_pack=data["pieces_per_pack"],
-        machine_rates=[
-            {
-                "machine_id": rate["machine_id"],
-                "operator_price": Decimal(rate["operator_price"]),
-                "mechanic_price": Decimal(rate["mechanic_price"]),
-            }
-            for rate in data["machine_rates"]
-        ],
-    )
+    rails = []
+
+    for rail_name in rail_names:
+        rails.append(
+            await rail_service.create_with_rates_for_all_machines(
+                name=rail_name,
+                length=Decimal(data["length"]),
+                pieces_per_pack=data["pieces_per_pack"],
+                machine_rates=machine_rates,
+            )
+        )
 
     enabled_count = len(data["machine_rates"])
     skipped_count = len(data["machines"]) - enabled_count
+    names_text = "\n".join(f"- {rail.name}" for rail in rails)
 
     await state.clear()
     await message.answer(
-        "✅ Рейка сохранена.\n\n"
-        f"Название: {rail.name}\n"
-        f"Длина штуки: {rail.length} м\n"
-        f"Штук в коробке: {rail.pieces_per_pack}\n"
+        "✅ Рейки сохранены.\n\n"
+        f"{names_text}\n\n"
+        f"Длина штуки: {rails[0].length} м\n"
+        f"Штук в коробке: {rails[0].pieces_per_pack}\n"
         f"Станков с ценой: {enabled_count}\n"
         f"Пропущено станков: {skipped_count}",
         reply_markup=admin_keyboard,
@@ -498,10 +529,71 @@ async def add_rail_start(
         await message.answer("Справочник реек ведет админ/мастер.")
         return
 
+    await state.set_state(AdminRailState.rail_class)
+    await message.answer(
+        "Выберите класс рейки:",
+        reply_markup=rail_class_keyboard,
+    )
+
+
+@router.message(AdminRailState.rail_class)
+async def admin_rail_class(
+    message: Message,
+    state: FSMContext,
+):
+    if not message.text or message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    rail_class = message.text.strip()
+
+    if rail_class not in RAIL_CLASSES:
+        await message.answer(
+            "Выберите класс рейки кнопкой.",
+            reply_markup=rail_class_keyboard,
+        )
+        return
+
+    await state.update_data(rail_class=rail_class)
+    await state.set_state(AdminRailState.rail_shapes)
+    await message.answer(
+        "Выберите вид рейки.\n\n"
+        "Если цены одинаковые для всех видов, нажмите «Все виды».",
+        reply_markup=rail_shape_keyboard(rail_class),
+    )
+
+
+@router.message(AdminRailState.rail_shapes)
+async def admin_rail_shapes(
+    message: Message,
+    state: FSMContext,
+):
+    if not message.text or message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    data = await state.get_data()
+    rail_class = data["rail_class"]
+    available_shapes = RAIL_CLASSES[rail_class]
+    selected = message.text.strip()
+
+    if selected == "Все виды":
+        rail_shapes = available_shapes
+    elif selected in available_shapes:
+        rail_shapes = [selected]
+    else:
+        await message.answer(
+            "Выберите вид рейки кнопкой.",
+            reply_markup=rail_shape_keyboard(rail_class),
+        )
+        return
+
+    await state.update_data(rail_shapes=rail_shapes)
     await state.set_state(AdminRailState.name)
     await message.answer(
-        "Введите название рейки.\n\n"
-        "Например: GL15 мама 75x75 h37 b15",
+        "Введите модель или размер без вида рейки.\n\n"
+        "Например: 50x40x10\n"
+        "или: GL15 75x75 h37 b15",
         reply_markup=admin_keyboard,
     )
 
