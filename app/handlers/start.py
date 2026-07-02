@@ -1015,6 +1015,15 @@ async def admin_rail_pieces(
             )
             return
 
+        await state.clear()
+        await message.answer(
+            "Для направляющей цены вручную не вводятся.\n\n"
+            "Сначала добавьте эконом «Мама» или «Папа» с таким же размером, "
+            "а потом добавьте направляющую — ставки скопируются автоматически.",
+            reply_markup=admin_keyboard,
+        )
+        return
+
     machines = await machine_service.get_all()
 
     if not machines:
