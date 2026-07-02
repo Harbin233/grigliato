@@ -26,6 +26,21 @@ def whole_meters(value: Decimal) -> int:
 
 
 class ProductionService:
+    async def get_enabled_rails(self) -> list[Rail]:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(Rail)
+                .join(MachineRail)
+                .where(
+                    Rail.is_active.is_(True),
+                    MachineRail.is_enabled.is_(True),
+                )
+                .distinct()
+                .order_by(Rail.name)
+            )
+
+            return list(result.scalars().all())
+
     async def get_enabled_rails_for_machine(
         self,
         machine_id: int,
@@ -40,6 +55,24 @@ class ProductionService:
                 )
                 .join(MachineRail.rail)
                 .order_by(Rail.name)
+            )
+
+            return list(result.scalars().all())
+
+    async def get_enabled_machines_for_rail(
+        self,
+        rail_id: int,
+    ) -> list[MachineRail]:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(MachineRail)
+                .options(selectinload(MachineRail.machine))
+                .where(
+                    MachineRail.rail_id == rail_id,
+                    MachineRail.is_enabled.is_(True),
+                )
+                .join(MachineRail.machine)
+                .order_by(Machine.name)
             )
 
             return list(result.scalars().all())

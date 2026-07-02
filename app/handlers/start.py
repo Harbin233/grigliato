@@ -92,7 +92,8 @@ shift_keyboard = keyboard([
 
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
-    ["➕ Добавить продукцию"],
+    ["➕ Записать продукцию"],
+    ["📚 Справочник реек"],
     ["⚙️ Админ режим"],
     ["🕒 Подработка"],
 ])
@@ -239,6 +240,23 @@ async def production_machines_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def production_all_rails_keyboard() -> InlineKeyboardMarkup:
+    rails = await production_service.get_enabled_rails()
+    rows = []
+
+    for rail in rails:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=rail.name,
+                    callback_data=f"prod_rail_first:{rail.id}",
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
     machine_rails = await production_service.get_enabled_rails_for_machine(
         machine_id
@@ -252,6 +270,31 @@ async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
                     text=machine_rail.rail.name,
                     callback_data=f"prod_rail:{machine_id}:{machine_rail.id}",
                 )
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def production_machines_for_rail_keyboard(
+    rail_id: int,
+) -> InlineKeyboardMarkup:
+    machine_rails = await production_service.get_enabled_machines_for_rail(
+        rail_id
+    )
+    rows = []
+
+    for index in range(0, len(machine_rails), 2):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=machine_rail.machine.name,
+                    callback_data=(
+                        "prod_machine_for_rail:"
+                        f"{machine_rail.machine_id}:{machine_rail.id}"
+                    ),
+                )
+                for machine_rail in machine_rails[index:index + 2]
             ]
         )
 
@@ -530,6 +573,7 @@ async def handle_work_start(
     )
 
 
+@router.message(F.text == "➕ Записать продукцию")
 @router.message(F.text == "➕ Добавить продукцию")
 async def add_production(
     message: Message,
@@ -555,12 +599,22 @@ async def add_production(
         return
 
     await state.clear()
+    keyboard_markup = await production_all_rails_keyboard()
+
+    if not keyboard_markup.inline_keyboard:
+        await message.answer(
+            "В справочнике пока нет активных реек со ставками.\n\n"
+            "Откройте «📚 Справочник реек» и добавьте рейку."
+        )
+        return
+
     await message.answer(
-        "Выберите станок для записи продукции:",
-        reply_markup=await production_machines_keyboard(),
+        "Выберите рейку для записи продукции:",
+        reply_markup=keyboard_markup,
     )
 
 
+@router.message(F.text == "📚 Справочник реек")
 @router.message(F.text == "⚙️ Админ режим")
 async def admin_mode(
     message: Message,
@@ -576,7 +630,7 @@ async def admin_mode(
     await state.clear()
     await message.answer(
         "Админ режим.\n\n"
-        "Сейчас доступно ведение справочника реек.",
+        "Здесь добавляются новые рейки и ставки по станкам.",
         reply_markup=admin_keyboard,
     )
 
@@ -668,6 +722,7 @@ async def admin_rail_shapes(
     await state.set_state(AdminRailState.name)
     await message.answer(
         "Введите модель или размер без вида рейки.\n\n"
+        "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
         "Например: 50x40x10\n"
         "или: GL15 75x75 h37 b15",
         reply_markup=admin_keyboard,
@@ -940,6 +995,70 @@ async def select_production_machine(
     await callback.message.answer(
         "Выберите рейку:",
         reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_rail_first:"))
+async def select_production_rail_first(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию записывает наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    keyboard_markup = await production_machines_for_rail_keyboard(rail_id)
+
+    if not keyboard_markup.inline_keyboard:
+        await callback.message.answer(
+            "Для этой рейки пока нет активных ставок по станкам."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите станок:",
+        reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_machine_for_rail:"))
+async def select_production_machine_for_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию записывает наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
+
+    await state.update_data(
+        machine_id=int(machine_id_raw),
+        machine_rail_id=int(machine_rail_id_raw),
+    )
+    await state.set_state(ProductionState.packs)
+
+    await callback.message.answer(
+        "Введите количество коробок целым числом:"
     )
     await callback.answer()
 
