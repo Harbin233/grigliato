@@ -64,15 +64,28 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
 
 
 RAIL_CLASSES = {
-    "Эконом": ["Мама", "Папа"],
+    "Эконом": ["Мама", "Папа", "Напр"],
     "GL": ["Мама", "Папа", "L"],
+}
+
+RAIL_PRICE_GROUPS = {
+    "Эконом": [
+        ["Мама", "Папа"],
+        ["Напр"],
+    ],
+    "GL": [
+        ["Мама", "Папа", "L"],
+    ],
 }
 
 RAIL_SHAPE_CODES = {
     "mama": "Мама",
     "papa": "Папа",
+    "napr": "Напр",
     "l": "L",
 }
+
+ECONOM_GUIDE_LENGTHS = ["0.6", "1.2", "2.40"]
 
 
 def parse_decimal(text: str) -> Decimal | None:
@@ -108,6 +121,11 @@ admin_skip_keyboard = keyboard([
     ["↩️ Назад"],
 ])
 
+econom_guide_length_keyboard = keyboard([
+    ["0.6", "1.2", "2.40"],
+    ["↩️ Назад"],
+])
+
 rail_class_keyboard = keyboard([
     ["Эконом", "GL"],
     ["↩️ Назад"],
@@ -117,7 +135,12 @@ rail_class_keyboard = keyboard([
 def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
     shapes = RAIL_CLASSES[rail_class]
     rows = [[shape] for shape in shapes]
-    rows.append(["Все виды"])
+
+    if rail_class == "Эконом":
+        rows.append(["Мама + Папа"])
+    else:
+        rows.append(["Все виды"])
+
     rows.append(["↩️ Назад"])
 
     return keyboard(rows)
@@ -136,7 +159,7 @@ def rail_base_name_prompt(rail_class: str) -> str:
         "Введите модель или размер без класса Эконом и без вида рейки.\n\n"
         "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
         "Например: 50x40x10\n"
-        "или: 60x40x10"
+        "или: направляющая 40x20"
     )
 
 
@@ -166,11 +189,15 @@ def split_rail_name(name: str) -> tuple[str, str, str] | None:
 
 
 def related_rail_shapes(rail_class: str, rail_shape: str) -> list[str]:
-    return [
-        shape
-        for shape in RAIL_CLASSES.get(rail_class, [])
-        if shape != rail_shape
-    ]
+    for group in RAIL_PRICE_GROUPS.get(rail_class, []):
+        if rail_shape in group:
+            return [
+                shape
+                for shape in group
+                if shape != rail_shape
+            ]
+
+    return []
 
 
 def shape_code(rail_shape: str) -> str:
@@ -721,7 +748,9 @@ async def admin_rail_class(
     await state.set_state(AdminRailState.rail_shapes)
     await message.answer(
         "Выберите вид рейки.\n\n"
-        "Если цены одинаковые для всех видов, нажмите «Все виды».\n\n"
+        "Если добавляете эконом маму и папу с одинаковыми ценами, "
+        "нажмите «Мама + Папа».\n"
+        "Для GL с одинаковыми ценами нажмите «Все виды».\n\n"
         f"Уже есть {rail_class}:\n"
         f"{rails_list_text(existing_rails)}",
         reply_markup=rail_shape_keyboard(rail_class),
@@ -742,8 +771,10 @@ async def admin_rail_shapes(
     available_shapes = RAIL_CLASSES[rail_class]
     selected = message.text.strip()
 
-    if selected == "Все виды":
+    if selected == "Все виды" and rail_class == "GL":
         rail_shapes = available_shapes
+    elif selected == "Мама + Папа" and rail_class == "Эконом":
+        rail_shapes = ["Мама", "Папа"]
     elif selected in available_shapes:
         rail_shapes = [selected]
     else:
@@ -832,9 +863,17 @@ async def admin_rail_name(
 
     await state.update_data(name=base_name)
     await state.set_state(AdminRailState.length)
+    if data["rail_class"] == "Эконом" and rail_shapes == ["Напр"]:
+        await message.answer(
+            "Выберите длину направляющей:",
+            reply_markup=econom_guide_length_keyboard,
+        )
+        return
+
     await message.answer(
         "Введите длину одной штуки в метрах.\n\n"
-        "Например: 0.6"
+        "Например: 0.6",
+        reply_markup=admin_keyboard,
     )
 
 
@@ -847,7 +886,21 @@ async def admin_rail_length(
         await back_to_main(message, state)
         return
 
-    length = parse_decimal(message.text or "")
+    data = await state.get_data()
+    text = (message.text or "").strip()
+
+    if (
+        data.get("rail_class") == "Эконом"
+        and data.get("rail_shapes") == ["Напр"]
+        and text not in ECONOM_GUIDE_LENGTHS
+    ):
+        await message.answer(
+            "Выберите длину направляющей кнопкой.",
+            reply_markup=econom_guide_length_keyboard,
+        )
+        return
+
+    length = parse_decimal(text)
 
     if length is None or length <= 0:
         await message.answer("Введите длину числом, например 0.6")
