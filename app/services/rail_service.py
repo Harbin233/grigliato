@@ -55,7 +55,11 @@ class RailService:
 
             return rail
 
-    async def clone_pair_from_source(self, source_rail_id: int) -> Rail | None:
+    async def clone_shape_from_source(
+        self,
+        source_rail_id: int,
+        target_shape: str,
+    ) -> Rail | None:
         async with SessionLocal() as session:
             source = await session.get(Rail, source_rail_id)
 
@@ -67,24 +71,24 @@ class RailService:
             if len(parts) != 3:
                 return None
 
-            rail_class, rail_shape, rail_base_name = parts
-            pair_shape = {
-                "Мама": "Папа",
-                "Папа": "Мама",
-            }.get(rail_shape)
+            rail_class, _rail_shape, rail_base_name = parts
+            allowed_shapes = {
+                "Эконом": {"Мама", "Папа"},
+                "GL": {"Мама", "Папа", "L"},
+            }.get(rail_class, set())
 
-            if pair_shape is None:
+            if target_shape not in allowed_shapes:
                 return None
 
-            pair_name = f"{rail_class} {pair_shape} {rail_base_name}"
+            target_name = f"{rail_class} {target_shape} {rail_base_name}"
             result = await session.execute(
-                select(Rail).where(Rail.name == pair_name)
+                select(Rail).where(Rail.name == target_name)
             )
             target = result.scalar_one_or_none()
 
             if target is None:
                 target = Rail(
-                    name=pair_name,
+                    name=target_name,
                     length=source.length,
                     pieces_per_pack=source.pieces_per_pack,
                     metal=source.metal,
@@ -147,6 +151,29 @@ class RailService:
             await session.refresh(target)
 
             return target
+
+    async def clone_pair_from_source(self, source_rail_id: int) -> Rail | None:
+        async with SessionLocal() as session:
+            source = await session.get(Rail, source_rail_id)
+
+            if source is None:
+                return None
+
+            parts = source.name.split(" ", maxsplit=2)
+
+            if len(parts) != 3:
+                return None
+
+            _rail_class, rail_shape, _rail_base_name = parts
+            pair_shape = {
+                "Мама": "Папа",
+                "Папа": "Мама",
+            }.get(rail_shape)
+
+        if pair_shape is None:
+            return None
+
+        return await self.clone_shape_from_source(source_rail_id, pair_shape)
 
     async def create_with_rates_for_all_machines(
         self,
