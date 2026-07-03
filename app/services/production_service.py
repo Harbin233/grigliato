@@ -39,6 +39,37 @@ def guide_pay_multiplier(rail: Rail, rail_length: Decimal) -> int:
 
 
 class ProductionService:
+    def calculate_machine_rail(
+        self,
+        machine_rail: MachineRail,
+        packs: int,
+    ) -> dict:
+        rail = machine_rail.rail
+        pieces = packs * rail.pieces_per_pack
+        rail_length = Decimal(str(rail.length))
+        operator_price = Decimal(str(machine_rail.operator_price))
+        mechanic_price = Decimal(str(machine_rail.mechanic_price))
+        payable_pieces = pieces * guide_pay_multiplier(rail, rail_length)
+
+        total_meters = meters(Decimal(pieces) * rail_length)
+        operator_total = money(
+            Decimal(payable_pieces) / Decimal(1000) * operator_price
+        )
+        mechanic_total = money(
+            Decimal(payable_pieces) / Decimal(1000) * mechanic_price
+        )
+
+        return {
+            "pieces": pieces,
+            "payable_pieces": payable_pieces,
+            "meters": total_meters,
+            "operator_price": operator_price,
+            "mechanic_price": mechanic_price,
+            "operator_total": operator_total,
+            "mechanic_total": mechanic_total,
+            "rail_length": rail_length,
+        }
+
     async def get_enabled_rails(self) -> list[Rail]:
         async with SessionLocal() as session:
             result = await session.execute(
@@ -183,6 +214,25 @@ class ProductionService:
 
             return result.scalar_one_or_none()
 
+    async def get_enabled_machine_rail_by_id(
+        self,
+        machine_rail_id: int,
+    ) -> MachineRail | None:
+        async with SessionLocal() as session:
+            machine_rail = await session.get(
+                MachineRail,
+                machine_rail_id,
+                options=[
+                    selectinload(MachineRail.machine),
+                    selectinload(MachineRail.rail),
+                ],
+            )
+
+            if machine_rail is None or not machine_rail.is_enabled:
+                return None
+
+            return machine_rail
+
     async def create_entry(
         self,
         shift: Shift,
@@ -220,19 +270,7 @@ class ProductionService:
             operator_id = operator.id if operator else None
 
             rail = machine_rail.rail
-            pieces = packs * rail.pieces_per_pack
-            rail_length = Decimal(str(rail.length))
-            operator_price = Decimal(str(machine_rail.operator_price))
-            mechanic_price = Decimal(str(machine_rail.mechanic_price))
-            payable_pieces = pieces * guide_pay_multiplier(rail, rail_length)
-
-            total_meters = meters(Decimal(pieces) * rail_length)
-            operator_total = money(
-                Decimal(payable_pieces) / Decimal(1000) * operator_price
-            )
-            mechanic_total = money(
-                Decimal(payable_pieces) / Decimal(1000) * mechanic_price
-            )
+            calculation = self.calculate_machine_rail(machine_rail, packs)
 
             entry = ProductionEntry(
                 shift_id=shift.id,
@@ -241,13 +279,13 @@ class ProductionService:
                 operator_name=operator_name,
                 operator_id=operator_id,
                 packs=packs,
-                pieces=pieces,
-                meters=total_meters,
-                operator_price=operator_price,
-                mechanic_price=mechanic_price,
-                operator_total=operator_total,
-                mechanic_total=mechanic_total,
-                rail_length=rail_length,
+                pieces=calculation["pieces"],
+                meters=calculation["meters"],
+                operator_price=calculation["operator_price"],
+                mechanic_price=calculation["mechanic_price"],
+                operator_total=calculation["operator_total"],
+                mechanic_total=calculation["mechanic_total"],
+                rail_length=calculation["rail_length"],
                 pieces_per_pack=rail.pieces_per_pack,
                 is_deleted=False,
             )
@@ -260,9 +298,33 @@ class ProductionService:
                 entry,
                 machine_rail.machine,
                 rail,
-                operator_total,
-                mechanic_total,
-                payable_pieces,
+                calculation["operator_total"],
+                calculation["mechanic_total"],
+                calculation["payable_pieces"],
+            )
+
+    async def calculate_entry(
+        self,
+        machine_rail_id: int,
+        packs: int,
+    ) -> tuple[Machine, Rail, dict]:
+        async with SessionLocal() as session:
+            machine_rail = await session.get(
+                MachineRail,
+                machine_rail_id,
+                options=[
+                    selectinload(MachineRail.machine),
+                    selectinload(MachineRail.rail),
+                ],
+            )
+
+            if machine_rail is None:
+                raise ValueError("Ставка для станка и рейки не найдена.")
+
+            return (
+                machine_rail.machine,
+                machine_rail.rail,
+                self.calculate_machine_rail(machine_rail, packs),
             )
 
     async def machine_shift_summary(

@@ -16,6 +16,7 @@ from aiogram.types import (
 from app.core.config import settings
 from app.models.shift_mechanic import MechanicType
 from app.models.user import UserRole
+from app.services.active_machine_rail_service import active_machine_rail_service
 from app.services.machine_service import machine_service
 from app.services.production_service import production_service, whole_meters
 from app.services.rail_service import rail_service
@@ -147,6 +148,7 @@ main_keyboard = keyboard([
     ["🛠 Мои станки"],
     ["👥 Люди смены"],
     ["➕ Записать продукцию"],
+    ["🧮 Тестовый просчет"],
     ["✅ Закрыть смену"],
     ["📚 Справочник реек"],
     ["⚙️ Админ режим"],
@@ -422,11 +424,13 @@ async def send_grouped_rails_step(
         "prod": "prodsel",
         "cat": "catsel",
         "mprod": "mprodsel",
+        "test": "testsel",
     }
     rail_prefixes = {
         "prod": "prod_rail_first",
         "cat": "catrail",
         "mprod": "mprod_rail",
+        "test": "test_rail_first",
     }
     prefix = prefixes[mode]
     rail_prefix = rail_prefixes[mode]
@@ -442,12 +446,14 @@ async def send_grouped_rails_step(
     field = next_group_field(infos, filters)
 
     if field is None:
-        if mode in ("prod", "mprod") and len(filtered) == 1:
+        if mode in ("prod", "mprod", "test") and len(filtered) == 1:
             rail = filtered[0]["rail"]
             confirm_prefix = (
                 "prod_confirm_rail"
                 if mode == "prod"
                 else "mprod_confirm_rail"
+                if mode == "mprod"
+                else "test_confirm_rail"
             )
             await message.answer(
                 "Все верно?\n\n"
@@ -719,6 +725,9 @@ def frequent_rails_keyboard(
 
 async def production_machines_for_rail_keyboard(
     rail_id: int,
+    callback_prefix: str = "prod_machine_for_rail",
+    back_callback: str = "nav:prod_current",
+    reset_callback: str = "prodsel:reset",
 ) -> InlineKeyboardMarkup:
     machine_rails = await production_service.get_enabled_machines_for_rail(
         rail_id
@@ -731,7 +740,7 @@ async def production_machines_for_rail_keyboard(
                 InlineKeyboardButton(
                     text=machine_rail.machine.name,
                     callback_data=(
-                        "prod_machine_for_rail:"
+                        f"{callback_prefix}:"
                         f"{machine_rail.machine_id}:{machine_rail.id}"
                     ),
                 )
@@ -741,8 +750,8 @@ async def production_machines_for_rail_keyboard(
 
     return with_action_navigation(
         rows,
-        ("⬅️ К рейкам", "nav:prod_current"),
-        ("🏠 Сначала", "prodsel:reset"),
+        ("⬅️ К рейкам", back_callback),
+        ("🏠 Сначала", reset_callback),
     )
 
 
@@ -829,8 +838,20 @@ def my_machine_panel_keyboard(machine_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="➕ Добавить продукцию",
+                    text="🔁 Поставить/сменить рейку",
                     callback_data=f"myprod_start:{machine_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Завершить рейку",
+                    callback_data=f"finish_active_rail:{machine_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Убрать рейку без отчёта",
+                    callback_data=f"clear_active_rail:{machine_id}",
                 )
             ],
             [
@@ -853,6 +874,26 @@ def my_machine_panel_keyboard(machine_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+async def my_machine_panel_text(machine, active) -> str:
+    active_rail = await active_machine_rail_service.get(active.id, machine.id)
+    lines = [
+        f"{machine.name} / смена №{active.shift_number}",
+    ]
+
+    if active_rail:
+        lines.extend(
+            [
+                "",
+                f"В работе: {active_rail.machine_rail.rail.name}",
+                f"Поставил: {active_rail.created_by.full_name}",
+            ]
+        )
+    else:
+        lines.extend(["", "В работе: рейка не поставлена."])
+
+    return "\n".join(lines)
 
 
 def close_shift_keyboard() -> InlineKeyboardMarkup:
@@ -1275,6 +1316,7 @@ async def shift_close_data(active) -> dict:
     )
     report = await production_service.shift_report(active.id)
     mechanics = await shift_mechanic_service.get_by_shift(active.id)
+    active_rails = await active_machine_rail_service.get_by_shift(active.id)
 
     assignment_by_machine_id = {
         assignment.machine_id: assignment
@@ -1288,6 +1330,10 @@ async def shift_close_data(active) -> dict:
     used_machine_ids.update(
         work_session.machine_id
         for work_session in active_work_sessions
+    )
+    used_machine_ids.update(
+        active_rail.machine_id
+        for active_rail in active_rails
     )
 
     unassigned_machine_ids = [
@@ -1360,11 +1406,21 @@ async def shift_close_data(active) -> dict:
     if report["entries_count"] == 0:
         warnings.append("В смене нет записанной продукции.")
 
+    if active_rails:
+        warnings.append(
+            "Есть рейки в работе без внесённого факта:\n"
+            + "\n".join(
+                f"- {item.machine.name}: {item.machine_rail.rail.name}"
+                for item in active_rails
+            )
+        )
+
     return {
         "assignments": assignments,
         "active_work_sessions": active_work_sessions,
         "report": report,
         "assignment_by_machine_id": assignment_by_machine_id,
+        "active_rails": active_rails,
         "blockers": blockers,
         "warnings": warnings,
     }
@@ -1656,6 +1712,34 @@ async def add_production(
         message,
         state,
         mode="prod",
+        rails=rails,
+    )
+
+
+@router.message(F.text == "🧮 Тестовый просчет")
+async def test_calculation_start(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
+        return
+
+    rails = await production_service.get_enabled_rails()
+
+    if not rails:
+        await message.answer("В справочнике пока нет активных реек со ставками.")
+        return
+
+    await state.clear()
+    await state.update_data(test_filters={}, test_history=[])
+    await send_grouped_rails_step(
+        message,
+        state,
+        mode="test",
         rails=rails,
     )
 
@@ -2219,6 +2303,79 @@ async def select_production_group(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("testsel:"))
+async def select_test_group(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await callback.message.answer("Сначала зарегистрируйтесь.")
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    action = callback.data.split(":", maxsplit=1)[1]
+
+    if action == "reset":
+        await state.update_data(test_filters={}, test_history=[])
+        rails = await production_service.get_enabled_rails()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="test",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    if action == "back":
+        history = data.get("test_history", [])
+
+        if not history:
+            await callback.answer("Это первый шаг.")
+            return
+
+        filters = history[-1]
+        await state.update_data(
+            test_filters=filters,
+            test_history=history[:-1],
+        )
+        rails = await production_service.get_enabled_rails()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="test",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    _, field, index_raw = callback.data.split(":")
+    values = data.get("test_values", [])
+    index = int(index_raw)
+
+    if index >= len(values):
+        await callback.answer("Выбор устарел. Начните заново.")
+        return
+
+    filters = dict(data.get("test_filters", {}))
+    history = data.get("test_history", [])
+    history.append(filters.copy())
+    filters[field] = values[index]
+    await state.update_data(test_filters=filters, test_history=history)
+    rails = await production_service.get_enabled_rails()
+    await send_grouped_rails_step(
+        callback.message,
+        state,
+        mode="test",
+        rails=rails,
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("catsel:"))
 async def select_catalog_group(
     callback: CallbackQuery,
@@ -2754,7 +2911,7 @@ async def my_machine_panel(
         return
 
     await callback.message.answer(
-        f"{machine.name} / смена №{active.shift_number}",
+        await my_machine_panel_text(machine, active),
         reply_markup=my_machine_panel_keyboard(machine.id),
     )
     await callback.answer()
@@ -2994,13 +3151,13 @@ async def select_frequent_production_rail(
 
     _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
 
-    await state.update_data(
+    await set_active_machine_rail(
+        callback,
+        state,
         machine_id=int(machine_id_raw),
         machine_rail_id=int(machine_rail_id_raw),
+        require_owner=False,
     )
-    await state.set_state(ProductionState.packs)
-    await callback.message.answer("Введите количество коробок целым числом:")
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("prod_rail_first:"))
@@ -3069,7 +3226,97 @@ async def confirm_production_rail(
     await callback.answer()
 
 
-async def start_machine_product_packs(
+@router.callback_query(F.data.startswith("test_rail_first:"))
+@router.callback_query(F.data.startswith("test_confirm_rail:"))
+async def select_test_rail(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await callback.message.answer("Сначала зарегистрируйтесь.")
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    keyboard_markup = await production_machines_for_rail_keyboard(
+        rail_id,
+        callback_prefix="test_machine_for_rail",
+        back_callback="testsel:back",
+        reset_callback="testsel:reset",
+    )
+
+    if not keyboard_markup.inline_keyboard:
+        await callback.message.answer(
+            "Для этой рейки пока нет активных ставок по станкам."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите станок для тестового просчёта:",
+        reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+async def set_active_machine_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    machine_id: int,
+    machine_rail_id: int,
+    require_owner: bool,
+) -> None:
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Рейку ставит в работу наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    if require_owner and not await ensure_machine_owner(user, active, machine_id):
+        await callback.message.answer(
+            "Этот станок не закреплен за вами в текущей смене."
+        )
+        await callback.answer()
+        return
+
+    machine_rail = await production_service.get_enabled_machine_rail_by_id(
+        machine_rail_id,
+    )
+
+    if machine_rail is None or machine_rail.machine_id != machine_id:
+        await callback.message.answer(
+            "Для этой рейки нет активной ставки на выбранном станке."
+        )
+        await callback.answer()
+        return
+
+    await active_machine_rail_service.set_active(active, machine_rail, user)
+    await state.clear()
+    await callback.message.answer(
+        "✅ Рейка поставлена в работу.\n\n"
+        f"Станок: {machine_rail.machine.name}\n"
+        f"Рейка: {machine_rail.rail.name}\n\n"
+        "Деньги и продукция пока не считаются. "
+        "Когда рейка будет сделана, нажмите «✅ Завершить рейку».",
+        reply_markup=my_machine_panel_keyboard(machine_rail.machine.id),
+    )
+    await callback.answer()
+
+
+async def start_machine_product_work(
     callback: CallbackQuery,
     state: FSMContext,
     rail_id: int,
@@ -3111,17 +3358,13 @@ async def start_machine_product_packs(
         await callback.answer()
         return
 
-    await state.update_data(
+    await set_active_machine_rail(
+        callback,
+        state,
         machine_id=machine_id,
         machine_rail_id=machine_rail.id,
+        require_owner=True,
     )
-    await state.set_state(ProductionState.packs)
-    await callback.message.answer(
-        f"Станок: {machine_rail.machine.name}\n"
-        f"Рейка: {machine_rail.rail.name}\n\n"
-        "Введите количество коробок целым числом:"
-    )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("mprod_confirm_rail:"))
@@ -3130,7 +3373,7 @@ async def confirm_machine_production_rail(
     state: FSMContext,
 ):
     rail_id = int(callback.data.split(":", maxsplit=1)[1])
-    await start_machine_product_packs(callback, state, rail_id)
+    await start_machine_product_work(callback, state, rail_id)
 
 
 @router.callback_query(F.data.startswith("mprod_rail:"))
@@ -3139,7 +3382,7 @@ async def select_machine_production_rail(
     state: FSMContext,
 ):
     rail_id = int(callback.data.split(":", maxsplit=1)[1])
-    await start_machine_product_packs(callback, state, rail_id)
+    await start_machine_product_work(callback, state, rail_id)
 
 
 @router.callback_query(F.data.startswith("mprod_catalog:"))
@@ -3186,6 +3429,93 @@ async def machine_production_catalog(
         state,
         mode="mprod",
         rails=[machine_rail.rail for machine_rail in machine_rails],
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("finish_active_rail:"))
+async def finish_active_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+
+    if not await ensure_machine_owner(user, active, machine_id):
+        await callback.message.answer(
+            "Этот станок не закреплен за вами в текущей смене."
+        )
+        await callback.answer()
+        return
+
+    active_rail = await active_machine_rail_service.get(active.id, machine_id)
+
+    if active_rail is None:
+        await callback.message.answer("На этом станке нет рейки в работе.")
+        await callback.answer()
+        return
+
+    await state.clear()
+    await state.update_data(
+        entry_mode="active_finish",
+        machine_id=machine_id,
+        machine_rail_id=active_rail.machine_rail_id,
+        mprod_machine_id=machine_id,
+    )
+    await state.set_state(ProductionState.packs)
+    await callback.message.answer(
+        f"Завершение рейки.\n\n"
+        f"Станок: {active_rail.machine.name}\n"
+        f"Рейка: {active_rail.machine_rail.rail.name}\n\n"
+        "Введите фактическое количество коробок целым числом:"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("clear_active_rail:"))
+async def clear_active_rail(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+
+    if not await ensure_machine_owner(user, active, machine_id):
+        await callback.message.answer(
+            "Этот станок не закреплен за вами в текущей смене."
+        )
+        await callback.answer()
+        return
+
+    cleared = await active_machine_rail_service.clear(active.id, machine_id)
+    machine = await machine_service.get(machine_id)
+
+    await callback.message.answer(
+        (
+            "🗑 Рейка убрана без отчёта."
+            if cleared
+            else "На этом станке нет рейки в работе."
+        ),
+        reply_markup=(
+            my_machine_panel_keyboard(machine.id)
+            if machine
+            else None
+        ),
     )
     await callback.answer()
 
@@ -3492,13 +3822,51 @@ async def select_production_machine_for_rail(
 
     _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
 
+    await set_active_machine_rail(
+        callback,
+        state,
+        machine_id=int(machine_id_raw),
+        machine_rail_id=int(machine_rail_id_raw),
+        require_owner=False,
+    )
+
+
+@router.callback_query(F.data.startswith("test_machine_for_rail:"))
+async def select_test_machine_for_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await callback.message.answer("Сначала зарегистрируйтесь.")
+        await callback.answer()
+        return
+
+    _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
+    machine_rail = await production_service.get_enabled_machine_rail_by_id(
+        int(machine_rail_id_raw),
+    )
+
+    if machine_rail is None or machine_rail.machine_id != int(machine_id_raw):
+        await callback.message.answer(
+            "Для этой рейки нет активной ставки на выбранном станке."
+        )
+        await callback.answer()
+        return
+
     await state.update_data(
+        entry_mode="test_calc",
         machine_id=int(machine_id_raw),
         machine_rail_id=int(machine_rail_id_raw),
     )
     await state.set_state(ProductionState.packs)
 
     await callback.message.answer(
+        "Тестовый просчёт.\n\n"
+        f"Станок: {machine_rail.machine.name}\n"
+        f"Рейка: {machine_rail.rail.name}\n\n"
         "Введите количество коробок целым числом:"
     )
     await callback.answer()
@@ -3523,16 +3891,13 @@ async def select_production_rail(
 
     _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
 
-    await state.update_data(
+    await set_active_machine_rail(
+        callback,
+        state,
         machine_id=int(machine_id_raw),
         machine_rail_id=int(machine_rail_id_raw),
+        require_owner=False,
     )
-    await state.set_state(ProductionState.packs)
-
-    await callback.message.answer(
-        "Введите количество коробок целым числом:"
-    )
-    await callback.answer()
 
 
 @router.message(ProductionState.packs)
@@ -3544,29 +3909,39 @@ async def input_production_packs(
         message.from_user.id
     )
     user = await ensure_admin_role(user)
-    active = await shift_service.get_active_shift()
+    data = await state.get_data()
+    entry_mode = data.get("entry_mode")
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
-        await message.answer("Продукцию добавляет наладчик или админ/мастер.")
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
         await state.clear()
         return
 
-    if active is None:
-        await message.answer("Смена не открыта.")
-        await state.clear()
-        return
+    active = None
+
+    if entry_mode != "test_calc":
+        active = await shift_service.get_active_shift()
+
+        if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+            await message.answer("Продукцию добавляет наладчик или админ/мастер.")
+            await state.clear()
+            return
+
+        if active is None:
+            await message.answer("Смена не открыта.")
+            await state.clear()
+            return
 
     if message.text == "↩️ Назад":
-        data = await state.get_data()
         machine_id = data.get("mprod_machine_id") or data.get("machine_id")
         await state.clear()
 
-        if machine_id:
+        if machine_id and active is not None:
             machine = await machine_service.get(machine_id)
 
             if machine:
                 await message.answer(
-                    f"{machine.name} / смена №{active.shift_number}",
+                    await my_machine_panel_text(machine, active),
                     reply_markup=my_machine_panel_keyboard(machine.id),
                 )
                 return
@@ -3587,7 +3962,37 @@ async def input_production_packs(
         await message.answer("Количество коробок должно быть больше нуля.")
         return
 
-    data = await state.get_data()
+    if entry_mode == "test_calc":
+        try:
+            machine, rail, calculation = await production_service.calculate_entry(
+                data["machine_rail_id"],
+                packs,
+            )
+        except ValueError as error:
+            await message.answer(str(error))
+            await state.clear()
+            return
+
+        await state.clear()
+        payable_text = (
+            f"Расчетных штук: {calculation['payable_pieces']}\n"
+            if calculation["payable_pieces"] != calculation["pieces"]
+            else ""
+        )
+        await message.answer(
+            "🧮 Тестовый просчёт.\n\n"
+            f"Станок: {machine.name}\n"
+            f"Рейка: {rail.name}\n"
+            f"Коробок: {packs}\n"
+            f"Штук: {calculation['pieces']}\n"
+            f"{payable_text}"
+            f"Пог. метров: {whole_meters(calculation['meters'])}\n"
+            f"Оператору: {calculation['operator_total']} ₽\n"
+            f"Наладчикам всего: {calculation['mechanic_total']} ₽\n\n"
+            "В отчёт смены это не записано.",
+            reply_markup=main_keyboard,
+        )
+        return
 
     try:
         (
@@ -3610,6 +4015,9 @@ async def input_production_packs(
         await message.answer(str(error))
         await state.clear()
         return
+
+    if entry_mode == "active_finish":
+        await active_machine_rail_service.clear(active.id, data["machine_id"])
 
     started_from_my_machine = data.get("mprod_machine_id") is not None
     await state.clear()

@@ -5,6 +5,7 @@ from .machine_rail import MachineRail
 from .shift import Shift
 from .shift_mechanic import ShiftMechanic
 from .shift_machine_assignment import ShiftMachineAssignment
+from .active_machine_rail import ActiveMachineRail
 from .production_entry import ProductionEntry
 from .work_session import WorkSession
 
@@ -16,6 +17,7 @@ __all__ = [
     "Shift",
     "ShiftMechanic",
     "ShiftMachineAssignment",
+    "ActiveMachineRail",
     "ProductionEntry",
     "WorkSession",
 ]
