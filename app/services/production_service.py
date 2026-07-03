@@ -253,5 +253,88 @@ class ProductionService:
 
             return summary
 
+    async def shift_report(self, shift_id: int) -> dict:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(ProductionEntry, Rail, Machine)
+                    .join(Rail, ProductionEntry.rail_id == Rail.id)
+                    .join(Machine, ProductionEntry.machine_id == Machine.id)
+                    .where(
+                        ProductionEntry.shift_id == shift_id,
+                        ProductionEntry.is_deleted.is_(False),
+                    )
+                    .order_by(Machine.name, ProductionEntry.created_at)
+                )
+            ).all()
+
+            report = {
+                "packs": 0,
+                "pieces": 0,
+                "meters": Decimal("0"),
+                "operator_total": Decimal("0"),
+                "mechanic_total": Decimal("0"),
+                "entries_count": len(rows),
+                "types": {},
+                "machines": {},
+                "production_machine_ids": set(),
+            }
+
+            for entry, rail, machine in rows:
+                rail_type = rail.name.split(" ", maxsplit=1)[0]
+                entry_meters = Decimal(str(entry.meters))
+                entry_operator_total = Decimal(str(entry.operator_total))
+                entry_mechanic_total = Decimal(str(entry.mechanic_total))
+
+                report["packs"] += entry.packs
+                report["pieces"] += entry.pieces
+                report["meters"] += entry_meters
+                report["operator_total"] += entry_operator_total
+                report["mechanic_total"] += entry_mechanic_total
+                report["production_machine_ids"].add(machine.id)
+
+                for bucket in (
+                    report["types"].setdefault(
+                        rail_type,
+                        self._empty_summary(),
+                    ),
+                    report["machines"].setdefault(
+                        machine.id,
+                        {
+                            **self._empty_summary(),
+                            "machine_name": machine.name,
+                            "types": {},
+                        },
+                    ),
+                ):
+                    bucket["packs"] += entry.packs
+                    bucket["pieces"] += entry.pieces
+                    bucket["meters"] += entry_meters
+                    bucket["operator_total"] += entry_operator_total
+                    bucket["mechanic_total"] += entry_mechanic_total
+
+                machine_summary = report["machines"][machine.id]
+                type_summary = machine_summary["types"].setdefault(
+                    rail_type,
+                    self._empty_summary(),
+                )
+                type_summary["packs"] += entry.packs
+                type_summary["pieces"] += entry.pieces
+                type_summary["meters"] += entry_meters
+                type_summary["operator_total"] += entry_operator_total
+                type_summary["mechanic_total"] += entry_mechanic_total
+
+            return report
+
+    @staticmethod
+    def _empty_summary() -> dict:
+        return {
+            "packs": 0,
+            "pieces": 0,
+            "meters": Decimal("0"),
+            "operator_total": Decimal("0"),
+            "mechanic_total": Decimal("0"),
+        }
+
 
 production_service = ProductionService()

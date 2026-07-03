@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.db.session import SessionLocal
@@ -47,6 +47,27 @@ class WorkSessionService:
             )
 
             return result.scalar_one_or_none()
+
+    async def get_active_by_shift(
+        self,
+        shift_id: int,
+    ) -> list[WorkSession]:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(WorkSession)
+                .options(
+                    selectinload(WorkSession.user),
+                    selectinload(WorkSession.machine),
+                )
+                .where(
+                    WorkSession.shift_id == shift_id,
+                    WorkSession.ended_at.is_(None),
+                )
+                .join(WorkSession.machine)
+                .order_by(Machine.name)
+            )
+
+            return list(result.scalars().all())
 
     async def get_machines(self) -> list[Machine]:
         async with SessionLocal() as session:
@@ -138,6 +159,23 @@ class WorkSessionService:
             await session.commit()
 
             return True
+
+    async def finish_by_shift(
+        self,
+        shift_id: int,
+    ) -> int:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                update(WorkSession)
+                .where(
+                    WorkSession.shift_id == shift_id,
+                    WorkSession.ended_at.is_(None),
+                )
+                .values(ended_at=datetime.now())
+            )
+            await session.commit()
+
+            return result.rowcount
 
 
 work_session_service = WorkSessionService()

@@ -150,6 +150,7 @@ main_keyboard = keyboard([
     ["▶ Приступил к работе"],
     ["🛠 Мои станки"],
     ["➕ Записать продукцию"],
+    ["✅ Закрыть смену"],
     ["📚 Справочник реек"],
     ["⚙️ Админ режим"],
     ["🕒 Подработка"],
@@ -806,6 +807,23 @@ def my_machine_panel_keyboard(machine_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def close_shift_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Закрыть смену",
+                    callback_data="close_shift_confirm",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="nav:main",
+                ),
+            ]
+        ]
+    )
+
+
 def parse_machine_rate(text: str) -> tuple[Decimal, Decimal] | None:
     parts = text.replace(";", " ").replace(",", ".").split()
 
@@ -1138,6 +1156,246 @@ async def ensure_machine_owner(
     return assignment is not None and assignment.user_id == user.id
 
 
+def add_summary(target: dict, source: dict) -> None:
+    target["packs"] += source["packs"]
+    target["pieces"] += source["pieces"]
+    target["meters"] += source["meters"]
+    target["operator_total"] += source["operator_total"]
+    target["mechanic_total"] += source["mechanic_total"]
+
+
+def empty_report_summary() -> dict:
+    return {
+        "packs": 0,
+        "pieces": 0,
+        "meters": Decimal("0"),
+        "operator_total": Decimal("0"),
+        "mechanic_total": Decimal("0"),
+    }
+
+
+def summary_line(name: str, data: dict) -> str:
+    return (
+        f"- {name}: {data['packs']} кор. / {data['pieces']} шт / "
+        f"{whole_meters(data['meters'])} м / "
+        f"нал. {data['mechanic_total']} ₽"
+    )
+
+
+async def shift_close_data(active) -> dict:
+    assignments = await shift_machine_service.get_by_shift(active.id)
+    active_work_sessions = await work_session_service.get_active_by_shift(
+        active.id
+    )
+    report = await production_service.shift_report(active.id)
+    mechanics = await shift_mechanic_service.get_by_shift(active.id)
+
+    assignment_by_machine_id = {
+        assignment.machine_id: assignment
+        for assignment in assignments
+    }
+    assigned_user_ids = {
+        assignment.user_id
+        for assignment in assignments
+    }
+    used_machine_ids = set(report["production_machine_ids"])
+    used_machine_ids.update(
+        work_session.machine_id
+        for work_session in active_work_sessions
+    )
+
+    unassigned_machine_ids = [
+        machine_id
+        for machine_id in sorted(used_machine_ids)
+        if machine_id not in assignment_by_machine_id
+    ]
+    unassigned_machines = []
+
+    for machine_id in unassigned_machine_ids:
+        machine = await machine_service.get(machine_id)
+
+        if machine:
+            unassigned_machines.append(machine)
+
+    mechanics_without_machines = []
+
+    for mechanic in mechanics:
+        if mechanic.user_id in assigned_user_ids:
+            continue
+
+        mechanic_user = await user_service.get(mechanic.user_id)
+
+        if mechanic_user:
+            mechanics_without_machines.append(mechanic_user)
+
+    assigned_without_production = [
+        assignment
+        for assignment in assignments
+        if assignment.machine_id not in report["production_machine_ids"]
+    ]
+
+    blockers = []
+
+    if unassigned_machines:
+        blockers.append(
+            "Станки с работой/продукцией без наладчика:\n"
+            + "\n".join(f"- {machine.name}" for machine in unassigned_machines)
+        )
+
+    if mechanics_without_machines:
+        blockers.append(
+            "Наладчики без закреплённых станков:\n"
+            + "\n".join(
+                f"- {mechanic.full_name}"
+                for mechanic in mechanics_without_machines
+            )
+        )
+
+    warnings = []
+
+    if active_work_sessions:
+        warnings.append(
+            "Активные операторы будут завершены автоматически:\n"
+            + "\n".join(
+                f"- {work.machine.name}: {work.user.full_name}"
+                for work in active_work_sessions
+            )
+        )
+
+    if assigned_without_production:
+        warnings.append(
+            "Закреплены, но без продукции:\n"
+            + "\n".join(
+                f"- {assignment.machine.name}: {assignment.user.full_name}"
+                for assignment in assigned_without_production
+            )
+        )
+
+    if report["entries_count"] == 0:
+        warnings.append("В смене нет записанной продукции.")
+
+    return {
+        "assignments": assignments,
+        "active_work_sessions": active_work_sessions,
+        "report": report,
+        "assignment_by_machine_id": assignment_by_machine_id,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def shift_report_text(active, close_data: dict) -> str:
+    report = close_data["report"]
+    assignment_by_machine_id = close_data["assignment_by_machine_id"]
+    assignments = close_data["assignments"]
+
+    lines = [
+        f"Отчёт по смене №{active.shift_number}",
+        "",
+        "Итого:",
+        f"Записей: {report['entries_count']}",
+        f"Коробок: {report['packs']}",
+        f"Штук: {report['pieces']}",
+        f"Пог. метров: {whole_meters(report['meters'])}",
+        f"Операторам: {report['operator_total']} ₽",
+        f"Наладчикам: {report['mechanic_total']} ₽",
+    ]
+
+    if report["types"]:
+        lines.extend(["", "По типам:"])
+        lines.extend(
+            summary_line(rail_type, data)
+            for rail_type, data in sorted(report["types"].items())
+        )
+
+    mechanic_groups = {}
+
+    for assignment in assignments:
+        group = mechanic_groups.setdefault(
+            assignment.user_id,
+            {
+                "user_name": assignment.user.full_name,
+                "machines": [],
+                "summary": empty_report_summary(),
+                "types": {},
+            },
+        )
+        machine_summary = report["machines"].get(assignment.machine_id)
+        group["machines"].append(assignment.machine.name)
+
+        if not machine_summary:
+            continue
+
+        add_summary(group["summary"], machine_summary)
+
+        for rail_type, type_summary in machine_summary["types"].items():
+            target = group["types"].setdefault(
+                rail_type,
+                empty_report_summary(),
+            )
+            add_summary(target, type_summary)
+
+    if mechanic_groups:
+        lines.extend(["", "По наладчикам:"])
+
+        for group in sorted(
+            mechanic_groups.values(),
+            key=lambda item: item["user_name"],
+        ):
+            machines = ", ".join(group["machines"])
+            lines.append(f"{group['user_name']} ({machines})")
+            lines.append(summary_line("Итого", group["summary"]))
+
+            if group["types"]:
+                for rail_type, type_summary in sorted(group["types"].items()):
+                    lines.append(f"  {summary_line(rail_type, type_summary)}")
+
+    if report["machines"]:
+        lines.extend(["", "По станкам:"])
+
+        for machine_id, machine_summary in sorted(
+            report["machines"].items(),
+            key=lambda item: item[1]["machine_name"],
+        ):
+            assignment = assignment_by_machine_id.get(machine_id)
+            mechanic_name = (
+                assignment.user.full_name
+                if assignment
+                else "не закреплён"
+            )
+            lines.append(
+                f"{machine_summary['machine_name']} / {mechanic_name}"
+            )
+            lines.append(summary_line("Итого", machine_summary))
+
+            for rail_type, type_summary in sorted(
+                machine_summary["types"].items()
+            ):
+                lines.append(f"  {summary_line(rail_type, type_summary)}")
+
+    return "\n".join(lines)
+
+
+async def send_long_message(message: Message, text: str) -> None:
+    limit = 3900
+    current = []
+    current_length = 0
+
+    for line in text.splitlines():
+        next_length = current_length + len(line) + 1
+
+        if current and next_length > limit:
+            await message.answer("\n".join(current))
+            current = []
+            current_length = 0
+
+        current.append(line)
+        current_length += len(line) + 1
+
+    if current:
+        await message.answer("\n".join(current))
+
+
 @router.message(F.text == "🛠 Мои станки")
 async def my_machines_message(
     message: Message,
@@ -1160,6 +1418,52 @@ async def my_machines_message(
         return
 
     await show_my_machines(message, user, active)
+
+
+@router.message(F.text == "✅ Закрыть смену")
+async def close_shift_start(
+    message: Message,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer("Смену закрывает наладчик или админ/мастер.")
+        return
+
+    active = await shift_service.get_active_shift()
+
+    if active is None:
+        await message.answer("Открытой смены нет.")
+        return
+
+    close_data = await shift_close_data(active)
+
+    if close_data["blockers"]:
+        await message.answer(
+            "Нельзя закрыть смену.\n\n"
+            + "\n\n".join(close_data["blockers"])
+            + "\n\nИсправьте закрепление станков и попробуйте снова."
+        )
+        return
+
+    if close_data["warnings"]:
+        await message.answer(
+            "Проверка перед закрытием:\n\n"
+            + "\n\n".join(close_data["warnings"])
+        )
+    else:
+        await message.answer("Проверка перед закрытием пройдена.")
+
+    await send_long_message(message, shift_report_text(active, close_data))
+    await message.answer(
+        "Закрыть смену?",
+        reply_markup=close_shift_keyboard(),
+    )
 
 
 @router.message(F.text == "➕ Записать продукцию")
@@ -2022,6 +2326,55 @@ async def inline_navigation(
         return
 
     await callback.answer("Неизвестное действие.")
+
+
+@router.callback_query(F.data == "close_shift_confirm")
+async def close_shift_confirm(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Смену закрывает наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    active = await shift_service.get_active_shift()
+
+    if active is None:
+        await callback.message.answer("Открытой смены нет.")
+        await callback.answer()
+        return
+
+    close_data = await shift_close_data(active)
+
+    if close_data["blockers"]:
+        await callback.message.answer(
+            "Смена не закрыта.\n\n"
+            + "\n\n".join(close_data["blockers"])
+        )
+        await callback.answer()
+        return
+
+    report_text = shift_report_text(active, close_data)
+    finished_sessions = await work_session_service.finish_by_shift(active.id)
+    closed = await shift_service.finish_shift()
+
+    if not closed:
+        await callback.message.answer("Не получилось закрыть смену.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        f"✅ Смена №{active.shift_number} закрыта.\n"
+        f"Завершено активных операторов: {finished_sessions}",
+        reply_markup=main_keyboard,
+    )
+    await send_long_message(callback.message, report_text)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "my_machines")
