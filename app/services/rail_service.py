@@ -101,6 +101,39 @@ class RailService:
 
             return rate
 
+    async def update_params(
+        self,
+        rail_id: int,
+        length: Decimal,
+        pieces_per_pack: int,
+    ) -> Rail | None:
+        async with SessionLocal() as session:
+            rail = await session.get(Rail, rail_id)
+
+            if rail is None:
+                return None
+
+            rail.length = length
+            rail.pieces_per_pack = pieces_per_pack
+            await session.commit()
+            await session.refresh(rail)
+
+            return rail
+
+    async def enable_machine_rates(self, rail_id: int) -> int:
+        async with SessionLocal() as session:
+            rates = (
+                await session.execute(
+                    select(MachineRail).where(MachineRail.rail_id == rail_id)
+                )
+            ).scalars().all()
+
+            for rate in rates:
+                rate.is_enabled = True
+
+            await session.commit()
+            return len(rates)
+
     async def disable_machine_rate(
         self,
         rail_id: int,
@@ -361,6 +394,7 @@ class RailService:
         length: Decimal,
         pieces_per_pack: int,
         machine_rates: list[dict],
+        rates_enabled: bool = True,
     ) -> Rail:
         async with SessionLocal() as session:
             result = await session.execute(
@@ -412,7 +446,7 @@ class RailService:
                     else:
                         rate.operator_price = new_rate["operator_price"]
                         rate.mechanic_price = new_rate["mechanic_price"]
-                        rate.is_enabled = True
+                        rate.is_enabled = rates_enabled
                     continue
 
                 if new_rate is None:
@@ -424,7 +458,7 @@ class RailService:
                         rail_id=rail.id,
                         operator_price=new_rate["operator_price"],
                         mechanic_price=new_rate["mechanic_price"],
-                        is_enabled=True,
+                        is_enabled=rates_enabled,
                     )
                 )
 

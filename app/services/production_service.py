@@ -26,7 +26,7 @@ def whole_meters(value: Decimal) -> int:
 
 
 def guide_pay_multiplier(rail: Rail, rail_length: Decimal) -> int:
-    if not rail.name.startswith("Эконом Напр "):
+    if " Напр " not in rail.name:
         return 1
 
     if rail_length == Decimal("1.200"):

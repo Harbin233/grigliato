@@ -67,6 +67,9 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
 RAIL_CLASSES = {
     "Эконом": ["Мама", "Папа", "Напр"],
     "GL": ["Мама", "Папа", "L"],
+    "GL15": ["Мама", "Папа", "L"],
+    "Grigliato": ["Мама", "Папа", "Напр"],
+    "Пирамида": ["Мама", "Папа", "Напр"],
 }
 
 RAIL_PRICE_GROUPS = {
@@ -76,6 +79,17 @@ RAIL_PRICE_GROUPS = {
     ],
     "GL": [
         ["Мама", "Папа", "L"],
+    ],
+    "GL15": [
+        ["Мама", "Папа", "L"],
+    ],
+    "Grigliato": [
+        ["Мама", "Папа"],
+        ["Напр"],
+    ],
+    "Пирамида": [
+        ["Мама", "Папа"],
+        ["Напр"],
     ],
 }
 
@@ -156,6 +170,8 @@ econom_guide_length_keyboard = keyboard([
 
 rail_class_keyboard = keyboard([
     ["Эконом", "GL"],
+    ["GL15", "Grigliato"],
+    ["Пирамида"],
     ["↩️ Назад"],
 ])
 
@@ -164,7 +180,7 @@ def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
     shapes = RAIL_CLASSES[rail_class]
     rows = [[shape] for shape in shapes]
 
-    if rail_class == "Эконом":
+    if "Напр" in shapes:
         rows.append(["Мама + Папа"])
     else:
         rows.append(["Все виды"])
@@ -361,7 +377,7 @@ def catalog_rail_name(
     base_name: str,
     length: str | None = None,
 ) -> str:
-    if rail_class == "Эконом" and rail_shape == "Напр" and length:
+    if rail_shape == "Напр" and length:
         return f"{rail_class} {rail_shape} {base_name} {length}м"
 
     return rail_name(rail_class, rail_shape, base_name)
@@ -976,9 +992,9 @@ async def admin_rail_shapes(
     available_shapes = RAIL_CLASSES[rail_class]
     selected = message.text.strip()
 
-    if selected == "Все виды" and rail_class == "GL":
+    if selected == "Все виды" and "L" in available_shapes:
         rail_shapes = available_shapes
-    elif selected == "Мама + Папа" and rail_class == "Эконом":
+    elif selected == "Мама + Папа" and "Напр" in available_shapes:
         rail_shapes = ["Мама", "Папа"]
     elif selected in available_shapes:
         rail_shapes = [selected]
@@ -1011,7 +1027,7 @@ async def admin_rail_name(
     rail_shapes = data["rail_shapes"]
     existing_target_rails = []
 
-    if not (data["rail_class"] == "Эконом" and rail_shapes == ["Напр"]):
+    if rail_shapes != ["Напр"]:
         for rail_shape in rail_shapes:
             target_name = catalog_rail_name(
                 data["rail_class"],
@@ -1069,7 +1085,7 @@ async def admin_rail_name(
 
     await state.update_data(name=base_name)
     await state.set_state(AdminRailState.length)
-    if data["rail_class"] == "Эконом" and rail_shapes == ["Напр"]:
+    if rail_shapes == ["Напр"]:
         await message.answer(
             "Выберите длину направляющей:",
             reply_markup=econom_guide_length_keyboard,
@@ -1096,8 +1112,7 @@ async def admin_rail_length(
     text = (message.text or "").strip()
 
     if (
-        data.get("rail_class") == "Эконом"
-        and data.get("rail_shapes") == ["Напр"]
+        data.get("rail_shapes") == ["Напр"]
         and text not in ECONOM_GUIDE_LENGTHS
     ):
         await message.answer(
@@ -1112,7 +1127,7 @@ async def admin_rail_length(
         await message.answer("Введите длину числом, например 0.6")
         return
 
-    if data.get("rail_class") == "Эконом" and data.get("rail_shapes") == ["Напр"]:
+    if data.get("rail_shapes") == ["Напр"]:
         target_name = catalog_rail_name(
             data["rail_class"],
             "Напр",
@@ -1159,12 +1174,12 @@ async def admin_rail_pieces(
 
     data = await state.get_data()
 
-    if data.get("rail_class") == "Эконом" and data.get("rail_shapes") == ["Напр"]:
+    if data.get("rail_shapes") == ["Напр"]:
         source_rail = None
 
         for source_shape in ("Мама", "Папа"):
             source_rail = await rail_service.get_by_name(
-                rail_name("Эконом", source_shape, data["name"])
+                rail_name(data["rail_class"], source_shape, data["name"])
             )
 
             if source_rail:
@@ -1173,7 +1188,7 @@ async def admin_rail_pieces(
         if source_rail:
             rail = await rail_service.create_with_rates_copied_from_rail(
                 name=catalog_rail_name(
-                    "Эконом",
+                    data["rail_class"],
                     "Напр",
                     data["name"],
                     data["length"],
@@ -1194,7 +1209,7 @@ async def admin_rail_pieces(
                 return
 
             await message.answer(
-                "✅ Направляющая сохранена со ставками от эконом рейки.\n\n"
+                "✅ Направляющая сохранена со ставками от мамы/папы.\n\n"
                 f"Источник ставок: {source_rail.name}\n"
                 f"Создано: {rail.name}\n"
                 f"Длина: {rail.length} м\n"
@@ -1506,7 +1521,18 @@ def rail_rates_text(rates) -> str:
 
 
 def rail_edit_keyboard(rail_id: int, machines) -> InlineKeyboardMarkup:
-    rows = []
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Длина/фасовка",
+                callback_data=f"editparams:{rail_id}",
+            ),
+            InlineKeyboardButton(
+                text="✅ Включить ставки",
+                callback_data=f"enablerates:{rail_id}",
+            ),
+        ]
+    ]
 
     for machine in machines:
         rows.append(
@@ -1577,6 +1603,102 @@ async def back_to_catalog_groups(
         rails=rails,
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("editparams:"))
+async def start_edit_rail_params(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник доступен админу/мастеру.")
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    rail = await rail_service.get(rail_id)
+
+    if rail is None:
+        await callback.message.answer("Рейка не найдена.")
+        await callback.answer()
+        return
+
+    await state.update_data(edit_rail_id=rail_id)
+    await state.set_state(AdminRailState.edit_rail_params)
+    await callback.message.answer(
+        f"Рейка: {rail.name}\n\n"
+        "Введите длину и фасовку через пробел.\n"
+        "Например: 0.6 192",
+        reply_markup=admin_keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("enablerates:"))
+async def enable_catalog_rail_rates(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник доступен админу/мастеру.")
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    enabled_count = await rail_service.enable_machine_rates(rail_id)
+    await callback.message.answer(f"Включено ставок: {enabled_count}.")
+    await callback.answer()
+
+
+@router.message(AdminRailState.edit_rail_params)
+async def edit_rail_params(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    parts = (message.text or "").replace(";", " ").replace(",", ".").split()
+
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer(
+            "Введите длину и фасовку через пробел.\n"
+            "Например: 0.6 192"
+        )
+        return
+
+    length = parse_decimal(parts[0])
+    pieces_per_pack = int(parts[1])
+
+    if length is None or length <= 0 or pieces_per_pack <= 0:
+        await message.answer("Длина и фасовка должны быть больше нуля.")
+        return
+
+    data = await state.get_data()
+    rail = await rail_service.update_params(
+        rail_id=data["edit_rail_id"],
+        length=length,
+        pieces_per_pack=pieces_per_pack,
+    )
+    await state.clear()
+
+    if rail is None:
+        await message.answer("Рейка не найдена.", reply_markup=admin_keyboard)
+        return
+
+    await message.answer(
+        "Параметры рейки обновлены.\n\n"
+        f"{rail.name}\n"
+        f"Длина: {rail.length} м\n"
+        f"Штук в коробке: {rail.pieces_per_pack}",
+        reply_markup=admin_keyboard,
+    )
 
 
 @router.callback_query(F.data.startswith("editrate:"))
