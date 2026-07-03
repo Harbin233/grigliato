@@ -862,6 +862,12 @@ def my_machine_panel_keyboard(machine_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="⚖️ Вес рулона",
+                    callback_data=f"set_roll_weight:{machine_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="➖ Убрать из моих",
                     callback_data=f"unassign_machine:{machine_id}",
                 )
@@ -878,8 +884,14 @@ def my_machine_panel_keyboard(machine_id: int) -> InlineKeyboardMarkup:
 
 async def my_machine_panel_text(machine, active) -> str:
     active_rail = await active_machine_rail_service.get(active.id, machine.id)
+    assignment = await shift_machine_service.get_machine_assignment(
+        active.id,
+        machine.id,
+    )
     lines = [
         f"{machine.name} / смена №{active.shift_number}",
+        "",
+        f"Остаток рулона: {roll_weight_text(assignment.roll_weight_kg if assignment else None)}",
     ]
 
     if active_rail:
@@ -1238,7 +1250,10 @@ async def show_my_machines(
         user.id,
     )
     machines_text = (
-        "\n".join(f"- {assignment.machine.name}" for assignment in assignments)
+        "\n".join(
+            f"- {assignment.machine.name}: рулон {roll_weight_text(assignment.roll_weight_kg)}"
+            for assignment in assignments
+        )
         if assignments
         else "Пока нет закрепленных станков."
     )
@@ -1307,6 +1322,15 @@ def summary_line(name: str, data: dict) -> str:
         f"{whole_meters(data['meters'])} м / "
         f"принёс наладчикам {data['mechanic_total']} ₽"
     )
+
+
+def roll_weight_text(weight) -> str:
+    if weight is None:
+        return "не указан"
+
+    text = format(Decimal(str(weight)).quantize(Decimal("0.01")), "f")
+    text = text.rstrip("0").rstrip(".")
+    return f"{text} кг"
 
 
 async def shift_close_data(active) -> dict:
@@ -1403,6 +1427,21 @@ async def shift_close_data(active) -> dict:
             )
         )
 
+    assignments_without_weight = [
+        assignment
+        for assignment in assignments
+        if assignment.roll_weight_kg is None
+    ]
+
+    if assignments_without_weight:
+        warnings.append(
+            "Не внесён вес остатка рулона:\n"
+            + "\n".join(
+                f"- {assignment.machine.name}: {assignment.user.full_name}"
+                for assignment in assignments_without_weight
+            )
+        )
+
     if report["entries_count"] == 0:
         warnings.append("В смене нет записанной продукции.")
 
@@ -1458,12 +1497,16 @@ def shift_report_text(active, close_data: dict) -> str:
             {
                 "user_name": assignment.user.full_name,
                 "machines": [],
+                "weights": [],
                 "summary": empty_report_summary(),
                 "types": {},
             },
         )
         machine_summary = report["machines"].get(assignment.machine_id)
         group["machines"].append(assignment.machine.name)
+        group["weights"].append(
+            f"{assignment.machine.name}: {roll_weight_text(assignment.roll_weight_kg)}"
+        )
 
         if not machine_summary:
             continue
@@ -1486,6 +1529,7 @@ def shift_report_text(active, close_data: dict) -> str:
         ):
             machines = ", ".join(group["machines"])
             lines.append(f"{group['user_name']} ({machines})")
+            lines.append("Остатки рулонов: " + "; ".join(group["weights"]))
             lines.append(summary_line("Итого", group["summary"]))
 
             if group["types"]:
@@ -1508,6 +1552,10 @@ def shift_report_text(active, close_data: dict) -> str:
             lines.append(
                 f"{machine_summary['machine_name']} / {mechanic_name}"
             )
+            if assignment:
+                lines.append(
+                    f"Остаток рулона: {roll_weight_text(assignment.roll_weight_kg)}"
+                )
             lines.append(summary_line("Итого", machine_summary))
 
             for rail_type, type_summary in sorted(
@@ -2801,6 +2849,7 @@ async def take_machines_callback(
 @router.callback_query(F.data.startswith("assign_machine:"))
 async def assign_machine_to_mechanic(
     callback: CallbackQuery,
+    state: FSMContext,
 ):
     user = await user_service.get_by_telegram_id(callback.from_user.id)
     user = await ensure_admin_role(user)
@@ -2823,7 +2872,69 @@ async def assign_machine_to_mechanic(
         machine_id,
     )
     await callback.message.answer(("✅ " if ok else "⚠️ ") + text)
+
+    if ok:
+        machine = await machine_service.get(machine_id)
+        await state.clear()
+        await state.update_data(
+            roll_weight_shift_id=active.id,
+            roll_weight_user_id=user.id,
+            roll_weight_machine_id=machine_id,
+        )
+        await state.set_state(ProductionState.roll_weight)
+        await callback.message.answer(
+            f"Введите вес остатка рулона для {machine.name if machine else 'станка'} в кг.\n"
+            "Можно с запятой или точкой, например: 127.5"
+        )
+
     await show_take_machines(callback.message, user, active)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_roll_weight:"))
+async def set_roll_weight_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+    assignment = await shift_machine_service.get_machine_assignment(
+        active.id,
+        machine_id,
+    )
+
+    if assignment is None:
+        await callback.message.answer("Станок не закреплён в этой смене.")
+        await callback.answer()
+        return
+
+    if user.role != UserRole.ADMIN and assignment.user_id != user.id:
+        await callback.message.answer(
+            "Этот станок не закреплен за вами в текущей смене."
+        )
+        await callback.answer()
+        return
+
+    await state.clear()
+    await state.update_data(
+        roll_weight_shift_id=active.id,
+        roll_weight_user_id=assignment.user_id,
+        roll_weight_machine_id=machine_id,
+    )
+    await state.set_state(ProductionState.roll_weight)
+    await callback.message.answer(
+        f"Текущий вес: {roll_weight_text(assignment.roll_weight_kg)}\n\n"
+        f"Введите вес остатка рулона для {assignment.machine.name} в кг.\n"
+        "Можно с запятой или точкой, например: 127.5"
+    )
     await callback.answer()
 
 
@@ -3897,6 +4008,72 @@ async def select_production_rail(
         machine_id=int(machine_id_raw),
         machine_rail_id=int(machine_rail_id_raw),
         require_owner=False,
+    )
+
+
+@router.message(ProductionState.roll_weight)
+async def input_roll_weight(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await message.answer("Смена не найдена.")
+        await state.clear()
+        return
+
+    if message.text == "↩️ Назад":
+        await state.clear()
+        await message.answer("Главное меню.", reply_markup=main_keyboard)
+        return
+
+    weight = parse_decimal(message.text or "")
+
+    if weight is None or weight < 0:
+        await message.answer("Введите вес числом в кг. Например: 127.5")
+        return
+
+    data = await state.get_data()
+    shift_id = data.get("roll_weight_shift_id")
+    user_id = data.get("roll_weight_user_id")
+    machine_id = data.get("roll_weight_machine_id")
+
+    if shift_id != active.id or user_id is None or machine_id is None:
+        await message.answer("Данные устарели. Откройте «Мои станки» заново.")
+        await state.clear()
+        return
+
+    if user.role != UserRole.ADMIN and user.id != user_id:
+        await message.answer("Этот станок не закреплен за вами.")
+        await state.clear()
+        return
+
+    saved = await shift_machine_service.set_roll_weight(
+        shift_id,
+        user_id,
+        machine_id,
+        weight,
+    )
+
+    if not saved:
+        await message.answer("Станок не найден в ваших закреплениях.")
+        await state.clear()
+        return
+
+    machine = await machine_service.get(machine_id)
+    await state.clear()
+    await message.answer(
+        "✅ Вес остатка рулона сохранён.\n\n"
+        f"Станок: {machine.name if machine else machine_id}\n"
+        f"Вес: {roll_weight_text(weight)}",
+        reply_markup=(
+            my_machine_panel_keyboard(machine.id)
+            if machine
+            else main_keyboard
+        ),
     )
 
 

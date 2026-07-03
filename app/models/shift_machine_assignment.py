@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, Numeric, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import BaseModel
@@ -28,6 +28,11 @@ class ShiftMachineAssignment(BaseModel):
     machine_id: Mapped[int] = mapped_column(
         ForeignKey("machines.id"),
         nullable=False,
+    )
+
+    roll_weight_kg: Mapped[float | None] = mapped_column(
+        Numeric(8, 2),
+        nullable=True,
     )
 
     shift = relationship("Shift")

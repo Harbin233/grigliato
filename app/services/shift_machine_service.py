@@ -101,6 +101,30 @@ class ShiftMachineService:
 
             return True, "Станок добавлен в ваш список."
 
+    async def set_roll_weight(
+        self,
+        shift_id: int,
+        user_id: int,
+        machine_id: int,
+        weight_kg,
+    ) -> bool:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(ShiftMachineAssignment).where(
+                    ShiftMachineAssignment.shift_id == shift_id,
+                    ShiftMachineAssignment.user_id == user_id,
+                    ShiftMachineAssignment.machine_id == machine_id,
+                )
+            )
+            assignment = result.scalar_one_or_none()
+
+            if assignment is None:
+                return False
+
+            assignment.roll_weight_kg = weight_kg
+            await session.commit()
+            return True
+
     async def unassign(
         self,
         shift_id: int,
