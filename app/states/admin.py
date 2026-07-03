@@ -8,3 +8,4 @@ class AdminRailState(StatesGroup):
     length = State()
     pieces_per_pack = State()
     machine_rate = State()
+    edit_machine_rate = State()

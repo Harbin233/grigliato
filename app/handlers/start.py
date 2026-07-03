@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
@@ -86,6 +87,13 @@ RAIL_SHAPE_CODES = {
 }
 
 ECONOM_GUIDE_LENGTHS = ["0.6", "1.2", "2.40"]
+KNOWN_RAIL_CLASSES = ["Эконом", "GL", "Grigliato", "Пирамида"]
+KNOWN_RAIL_SHAPES = ["Мама", "Папа", "Напр", "L"]
+RAIL_GROUP_FIELDS = ["rail_class", "shape", "guide_length", "cell", "h", "b"]
+
+
+class RailInfo(dict):
+    pass
 
 
 def parse_decimal(text: str) -> Decimal | None:
@@ -93,6 +101,26 @@ def parse_decimal(text: str) -> Decimal | None:
         return Decimal(text.strip().replace(",", "."))
     except (InvalidOperation, AttributeError):
         return None
+
+
+def parse_mechanic_operator_rate(text: str) -> tuple[Decimal, Decimal] | None:
+    parts = text.replace(";", " ").replace(",", ".").split()
+
+    if len(parts) != 2:
+        return None
+
+    mechanic_price = parse_decimal(parts[0])
+    operator_price = parse_decimal(parts[1])
+
+    if (
+        mechanic_price is None
+        or operator_price is None
+        or mechanic_price < 0
+        or operator_price < 0
+    ):
+        return None
+
+    return mechanic_price, operator_price
 
 
 start_keyboard = keyboard([
@@ -173,6 +201,154 @@ def rails_list_text(rails, limit: int = 20) -> str:
         lines.append(f"...и ещё {len(rails) - limit}")
 
     return "\n".join(lines)
+
+
+def parse_catalog_rail(rail) -> RailInfo:
+    name = rail.name
+    parts = name.split()
+    rail_class = "Прочее"
+    shape = "Без вида"
+    offset = 0
+
+    if parts and parts[0] in KNOWN_RAIL_CLASSES:
+        rail_class = parts[0]
+        offset = 1
+
+    if len(parts) > offset and parts[offset] in KNOWN_RAIL_SHAPES:
+        shape = parts[offset]
+        offset += 1
+
+    base_parts = parts[offset:]
+    guide_length = ""
+
+    if shape == "Напр" and base_parts and base_parts[-1].endswith("м"):
+        guide_length = base_parts[-1].removesuffix("м")
+        base_parts = base_parts[:-1]
+
+    base_name = " ".join(base_parts) if base_parts else name
+    cell_match = re.search(r"\d+x\d+", base_name)
+    h_match = re.search(r"\bh\d+\b", base_name)
+    b_match = re.search(r"\bb\d+\b", base_name)
+
+    return RailInfo(
+        rail=rail,
+        rail_class=rail_class,
+        shape=shape,
+        guide_length=guide_length,
+        cell=cell_match.group(0) if cell_match else "Без ячейки",
+        h=h_match.group(0) if h_match else "Без h",
+        b=b_match.group(0) if b_match else "Без b",
+        base_name=base_name,
+    )
+
+
+def filter_rail_infos(infos: list[RailInfo], filters: dict) -> list[RailInfo]:
+    return [
+        info
+        for info in infos
+        if all(info.get(field) == value for field, value in filters.items())
+    ]
+
+
+def next_group_field(infos: list[RailInfo], filters: dict) -> str | None:
+    filtered = filter_rail_infos(infos, filters)
+
+    for field in RAIL_GROUP_FIELDS:
+        if field in filters:
+            continue
+
+        values = sorted({info.get(field, "") for info in filtered})
+
+        if len(values) > 1:
+            return field
+
+        if len(values) == 1:
+            filters[field] = values[0]
+
+    return None
+
+
+def group_field_title(field: str) -> str:
+    return {
+        "rail_class": "Выберите тип рейки:",
+        "shape": "Выберите вид рейки:",
+        "guide_length": "Выберите длину направляющей:",
+        "cell": "Выберите ячейку:",
+        "h": "Выберите высоту:",
+        "b": "Выберите b:",
+    }.get(field, "Выберите:")
+
+
+def group_keyboard(prefix: str, field: str, values: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+
+    for index in range(0, len(values), 2):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=value,
+                    callback_data=f"{prefix}:{field}:{index + offset}",
+                )
+                for offset, value in enumerate(values[index:index + 2])
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def rails_keyboard(prefix: str, infos: list[RailInfo]) -> InlineKeyboardMarkup:
+    rows = []
+
+    for info in infos:
+        rail = info["rail"]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=rail.name,
+                    callback_data=f"{prefix}:{rail.id}",
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_grouped_rails_step(
+    message,
+    state: FSMContext,
+    *,
+    mode: str,
+    rails,
+) -> None:
+    infos = [parse_catalog_rail(rail) for rail in rails]
+    state_key = f"{mode}_filters"
+    values_key = f"{mode}_values"
+    prefix = "prodsel" if mode == "prod" else "catsel"
+    rail_prefix = "prod_rail_first" if mode == "prod" else "catrail"
+    filters = (await state.get_data()).get(state_key, {})
+    filtered = filter_rail_infos(infos, filters)
+
+    if not filtered:
+        await message.answer("По выбранным параметрам рейки не найдены.")
+        return
+
+    field = next_group_field(infos, filters)
+
+    if field is None:
+        await message.answer(
+            "Выберите рейку:",
+            reply_markup=rails_keyboard(rail_prefix, filtered),
+        )
+        await state.update_data(**{state_key: filters, values_key: []})
+        return
+
+    filtered = filter_rail_infos(infos, filters)
+    values = sorted({info[field] for info in filtered})
+    await state.update_data(**{state_key: filters, values_key: values})
+    await message.answer(
+        group_field_title(field),
+        reply_markup=group_keyboard(prefix, field, values),
+    )
 
 
 def rail_name(rail_class: str, rail_shape: str, base_name: str) -> str:
@@ -672,18 +848,21 @@ async def add_production(
         return
 
     await state.clear()
-    keyboard_markup = await production_all_rails_keyboard()
+    rails = await production_service.get_enabled_rails()
 
-    if not keyboard_markup.inline_keyboard:
+    if not rails:
         await message.answer(
             "В справочнике пока нет активных реек со ставками.\n\n"
             "Откройте «📚 Справочник реек» и добавьте рейку."
         )
         return
 
-    await message.answer(
-        "Выберите рейку для записи продукции:",
-        reply_markup=keyboard_markup,
+    await state.update_data(prod_filters={})
+    await send_grouped_rails_step(
+        message,
+        state,
+        mode="prod",
+        rails=rails,
     )
 
 
@@ -704,11 +883,20 @@ async def admin_mode(
     rails = await rail_service.get_all()
     await message.answer(
         "Админ режим.\n\n"
-        "Здесь добавляются новые рейки и ставки по станкам.\n\n"
-        "Уже заведено:\n"
-        f"{rails_list_text(rails)}",
+        "Здесь добавляются новые рейки и редактируются ставки по станкам.",
         reply_markup=admin_keyboard,
     )
+
+    if rails:
+        await state.update_data(cat_filters={})
+        await send_grouped_rails_step(
+            message,
+            state,
+            mode="cat",
+            rails=rails,
+        )
+    else:
+        await message.answer("Пока нет заведённых реек.")
 
 
 @router.message(F.text == "↩️ Назад")
@@ -1163,6 +1351,78 @@ async def create_rail_pair(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("prodsel:"))
+async def select_production_group(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию записывает наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    _, field, index_raw = callback.data.split(":")
+    data = await state.get_data()
+    values = data.get("prod_values", [])
+    index = int(index_raw)
+
+    if index >= len(values):
+        await callback.answer("Выбор устарел. Начните заново.")
+        return
+
+    filters = data.get("prod_filters", {})
+    filters[field] = values[index]
+    await state.update_data(prod_filters=filters)
+    rails = await production_service.get_enabled_rails()
+    await send_grouped_rails_step(
+        callback.message,
+        state,
+        mode="prod",
+        rails=rails,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("catsel:"))
+async def select_catalog_group(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник доступен админу/мастеру.")
+        await callback.answer()
+        return
+
+    _, field, index_raw = callback.data.split(":")
+    data = await state.get_data()
+    values = data.get("cat_values", [])
+    index = int(index_raw)
+
+    if index >= len(values):
+        await callback.answer("Выбор устарел. Начните заново.")
+        return
+
+    filters = data.get("cat_filters", {})
+    filters[field] = values[index]
+    await state.update_data(cat_filters=filters)
+    rails = await rail_service.get_all()
+    await send_grouped_rails_step(
+        callback.message,
+        state,
+        mode="cat",
+        rails=rails,
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("prod_machine:"))
 async def select_production_machine(
     callback: CallbackQuery,
@@ -1227,6 +1487,182 @@ async def select_production_rail_first(
         reply_markup=keyboard_markup,
     )
     await callback.answer()
+
+
+def rail_rates_text(rates) -> str:
+    if not rates:
+        return "Ставки по станкам не заведены."
+
+    lines = []
+
+    for rate in rates:
+        status = "" if rate.is_enabled else " (выкл.)"
+        lines.append(
+            f"- {rate.machine.name}: "
+            f"{rate.mechanic_price}/{rate.operator_price}{status}"
+        )
+
+    return "\n".join(lines)
+
+
+def rail_edit_keyboard(rail_id: int, machines) -> InlineKeyboardMarkup:
+    rows = []
+
+    for machine in machines:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"✏️ {machine.name}",
+                    callback_data=f"editrate:{rail_id}:{machine.id}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ К списку",
+                callback_data="catback",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("catrail:"))
+async def show_catalog_rail(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник доступен админу/мастеру.")
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    rail, rates = await rail_service.get_with_rates(rail_id)
+    machines = await machine_service.get_all()
+
+    if rail is None:
+        await callback.message.answer("Рейка не найдена.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Карточка рейки\n\n"
+        f"{rail.name}\n"
+        f"Длина: {rail.length} м\n"
+        f"Штук в коробке: {rail.pieces_per_pack}\n\n"
+        "Ставки: наладчик/оператор\n"
+        f"{rail_rates_text(rates)}",
+        reply_markup=rail_edit_keyboard(rail.id, machines),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "catback")
+async def back_to_catalog_groups(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    rails = await rail_service.get_all()
+    await state.update_data(cat_filters={})
+    await send_grouped_rails_step(
+        callback.message,
+        state,
+        mode="cat",
+        rails=rails,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("editrate:"))
+async def start_edit_rail_rate(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role != UserRole.ADMIN:
+        await callback.message.answer("Справочник доступен админу/мастеру.")
+        await callback.answer()
+        return
+
+    _, rail_id_raw, machine_id_raw = callback.data.split(":")
+    rail_id = int(rail_id_raw)
+    machine_id = int(machine_id_raw)
+    rail = await rail_service.get(rail_id)
+    machine = await machine_service.get(machine_id)
+
+    if rail is None or machine is None:
+        await callback.message.answer("Рейка или станок не найдены.")
+        await callback.answer()
+        return
+
+    await state.update_data(
+        edit_rail_id=rail_id,
+        edit_machine_id=machine_id,
+    )
+    await state.set_state(AdminRailState.edit_machine_rate)
+    await callback.message.answer(
+        f"Рейка: {rail.name}\n"
+        f"Станок: {machine.name}\n\n"
+        "Введите ставки через пробел: наладчик оператор.\n"
+        "Например: 93.25 199.18\n\n"
+        "Или нажмите «⏭ Пропустить», чтобы отключить рейку на этом станке.",
+        reply_markup=admin_skip_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(AdminRailState.edit_machine_rate)
+async def edit_rail_machine_rate(
+    message: Message,
+    state: FSMContext,
+):
+    data = await state.get_data()
+    rail_id = data["edit_rail_id"]
+    machine_id = data["edit_machine_id"]
+
+    if message.text == "↩️ Назад":
+        await back_to_main(message, state)
+        return
+
+    if message.text == "⏭ Пропустить":
+        await rail_service.disable_machine_rate(rail_id, machine_id)
+        await state.clear()
+        await message.answer(
+            "Ставка отключена для выбранного станка.",
+            reply_markup=admin_keyboard,
+        )
+        return
+
+    prices = parse_mechanic_operator_rate(message.text or "")
+
+    if prices is None:
+        await message.answer(
+            "Введите две ставки через пробел: наладчик оператор.\n"
+            "Например: 93.25 199.18"
+        )
+        return
+
+    mechanic_price, operator_price = prices
+    await rail_service.set_machine_rate(
+        rail_id=rail_id,
+        machine_id=machine_id,
+        operator_price=operator_price,
+        mechanic_price=mechanic_price,
+        is_enabled=True,
+    )
+    await state.clear()
+    await message.answer(
+        "Ставка обновлена.",
+        reply_markup=admin_keyboard,
+    )
 
 
 @router.callback_query(F.data.startswith("prod_machine_for_rail:"))

@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.db.session import SessionLocal
 from app.models.machine import Machine
@@ -37,6 +38,90 @@ class RailService:
     async def get(self, rail_id: int):
         async with SessionLocal() as session:
             return await session.get(Rail, rail_id)
+
+    async def get_with_rates(self, rail_id: int):
+        async with SessionLocal() as session:
+            rail = await session.get(Rail, rail_id)
+
+            if rail is None:
+                return None, []
+
+            rates = (
+                await session.execute(
+                    select(MachineRail)
+                    .options(selectinload(MachineRail.machine))
+                    .where(MachineRail.rail_id == rail.id)
+                    .join(MachineRail.machine)
+                    .order_by(Machine.name)
+                )
+            ).scalars().all()
+
+            return rail, rates
+
+    async def set_machine_rate(
+        self,
+        rail_id: int,
+        machine_id: int,
+        operator_price: Decimal,
+        mechanic_price: Decimal,
+        is_enabled: bool = True,
+    ) -> MachineRail | None:
+        async with SessionLocal() as session:
+            rail = await session.get(Rail, rail_id)
+            machine = await session.get(Machine, machine_id)
+
+            if rail is None or machine is None:
+                return None
+
+            rate = (
+                await session.execute(
+                    select(MachineRail).where(
+                        MachineRail.rail_id == rail_id,
+                        MachineRail.machine_id == machine_id,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if rate is None:
+                rate = MachineRail(
+                    rail_id=rail_id,
+                    machine_id=machine_id,
+                    operator_price=operator_price,
+                    mechanic_price=mechanic_price,
+                    is_enabled=is_enabled,
+                )
+                session.add(rate)
+            else:
+                rate.operator_price = operator_price
+                rate.mechanic_price = mechanic_price
+                rate.is_enabled = is_enabled
+
+            await session.commit()
+            await session.refresh(rate)
+
+            return rate
+
+    async def disable_machine_rate(
+        self,
+        rail_id: int,
+        machine_id: int,
+    ) -> bool:
+        async with SessionLocal() as session:
+            rate = (
+                await session.execute(
+                    select(MachineRail).where(
+                        MachineRail.rail_id == rail_id,
+                        MachineRail.machine_id == machine_id,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if rate is None:
+                return False
+
+            rate.is_enabled = False
+            await session.commit()
+            return True
 
     async def get_by_name(self, name: str):
         async with SessionLocal() as session:
