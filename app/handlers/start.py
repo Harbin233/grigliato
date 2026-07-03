@@ -383,6 +383,23 @@ def rails_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def production_rail_confirm_keyboard(rail_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅",
+                    callback_data=f"prod_confirm_rail:{rail_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌",
+                    callback_data="prodsel:back",
+                ),
+            ]
+        ]
+    )
+
+
 async def send_grouped_rails_step(
     message,
     state: FSMContext,
@@ -408,6 +425,16 @@ async def send_grouped_rails_step(
     field = next_group_field(infos, filters)
 
     if field is None:
+        if mode == "prod" and len(filtered) == 1:
+            rail = filtered[0]["rail"]
+            await message.answer(
+                "Все верно?\n\n"
+                f"{rail.name}",
+                reply_markup=production_rail_confirm_keyboard(rail.id),
+            )
+            await state.update_data(**{state_key: filters, values_key: []})
+            return
+
         await message.answer(
             "Выберите рейку:",
             reply_markup=rails_keyboard(
@@ -1725,6 +1752,39 @@ async def select_production_machine(
 
 @router.callback_query(F.data.startswith("prod_rail_first:"))
 async def select_production_rail_first(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию записывает наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    rail_id = int(callback.data.split(":", maxsplit=1)[1])
+    keyboard_markup = await production_machines_for_rail_keyboard(rail_id)
+
+    if not keyboard_markup.inline_keyboard:
+        await callback.message.answer(
+            "Для этой рейки пока нет активных ставок по станкам."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите станок:",
+        reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_confirm_rail:"))
+async def confirm_production_rail(
     callback: CallbackQuery,
 ):
     user = await user_service.get_by_telegram_id(
