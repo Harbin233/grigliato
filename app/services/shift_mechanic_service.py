@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.db.session import SessionLocal
 from app.models.shift_mechanic import ShiftMechanic, MechanicType
@@ -100,6 +100,22 @@ class ShiftMechanicService:
             )
 
             return result.scalar_one_or_none()
+
+    async def remove(
+        self,
+        shift_id: int,
+        user_id: int,
+    ) -> bool:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                delete(ShiftMechanic).where(
+                    ShiftMechanic.shift_id == shift_id,
+                    ShiftMechanic.user_id == user_id,
+                )
+            )
+            await session.commit()
+
+            return result.rowcount > 0
 
 
 shift_mechanic_service = ShiftMechanicService()

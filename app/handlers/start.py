@@ -149,6 +149,7 @@ shift_keyboard = keyboard([
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
     ["🛠 Мои станки"],
+    ["👥 Люди смены"],
     ["➕ Записать продукцию"],
     ["✅ Закрыть смену"],
     ["📚 Справочник реек"],
@@ -824,6 +825,44 @@ def close_shift_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def shift_people_keyboard(
+    active_work_sessions,
+    mechanics: list[tuple[object, object]],
+) -> InlineKeyboardMarkup:
+    rows = []
+
+    for work in active_work_sessions:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"⏹ {work.machine.name}: {work.user.full_name}",
+                    callback_data=f"finish_operator:{work.id}",
+                )
+            ]
+        )
+
+    for mechanic, mechanic_user in mechanics:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"➖ {mechanic_user.full_name}",
+                    callback_data=f"finish_mechanic:{mechanic.user_id}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ В меню",
+                callback_data="nav:main",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def parse_machine_rate(text: str) -> tuple[Decimal, Decimal] | None:
     parts = text.replace(";", " ").replace(",", ".").split()
 
@@ -1178,7 +1217,7 @@ def summary_line(name: str, data: dict) -> str:
     return (
         f"- {name}: {data['packs']} кор. / {data['pieces']} шт / "
         f"{whole_meters(data['meters'])} м / "
-        f"нал. {data['mechanic_total']} ₽"
+        f"принёс наладчикам {data['mechanic_total']} ₽"
     )
 
 
@@ -1298,7 +1337,7 @@ def shift_report_text(active, close_data: dict) -> str:
         f"Штук: {report['pieces']}",
         f"Пог. метров: {whole_meters(report['meters'])}",
         f"Операторам: {report['operator_total']} ₽",
-        f"Наладчикам: {report['mechanic_total']} ₽",
+        f"Наладчикам всего: {report['mechanic_total']} ₽",
     ]
 
     if report["types"]:
@@ -1336,7 +1375,7 @@ def shift_report_text(active, close_data: dict) -> str:
             add_summary(target, type_summary)
 
     if mechanic_groups:
-        lines.extend(["", "По наладчикам:"])
+        lines.extend(["", "По наладчикам (сколько принесли их станки):"])
 
         for group in sorted(
             mechanic_groups.values(),
@@ -1396,6 +1435,46 @@ async def send_long_message(message: Message, text: str) -> None:
         await message.answer("\n".join(current))
 
 
+async def show_shift_people(message: Message, active) -> None:
+    active_work_sessions = await work_session_service.get_active_by_shift(
+        active.id
+    )
+    shift_mechanics = await shift_mechanic_service.get_by_shift(active.id)
+    mechanics = []
+
+    for mechanic in shift_mechanics:
+        mechanic_user = await user_service.get(mechanic.user_id)
+
+        if mechanic_user:
+            mechanics.append((mechanic, mechanic_user))
+
+    operator_lines = (
+        [
+            f"- {work.machine.name}: {work.user.full_name}"
+            for work in active_work_sessions
+        ]
+        or ["- нет активных операторов"]
+    )
+    mechanic_lines = (
+        [
+            f"- {mechanic_user.full_name}: "
+            f"{mechanic_status_text(mechanic.mechanic_type)}"
+            for mechanic, mechanic_user in mechanics
+        ]
+        or ["- нет отмеченных наладчиков"]
+    )
+
+    await message.answer(
+        f"Люди смены №{active.shift_number}\n\n"
+        "Операторы на станках:\n"
+        f"{chr(10).join(operator_lines)}\n\n"
+        "Наладчики:\n"
+        f"{chr(10).join(mechanic_lines)}\n\n"
+        "Нажмите на человека, чтобы закрыть/убрать его из смены.",
+        reply_markup=shift_people_keyboard(active_work_sessions, mechanics),
+    )
+
+
 @router.message(F.text == "🛠 Мои станки")
 async def my_machines_message(
     message: Message,
@@ -1418,6 +1497,30 @@ async def my_machines_message(
         return
 
     await show_my_machines(message, user, active)
+
+
+@router.message(F.text == "👥 Люди смены")
+async def shift_people_message(
+    message: Message,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer("Раздел доступен наладчику или админу/мастеру.")
+        return
+
+    active = await shift_service.get_active_shift()
+
+    if active is None:
+        await message.answer("Открытой смены нет.")
+        return
+
+    await show_shift_people(message, active)
 
 
 @router.message(F.text == "✅ Закрыть смену")
@@ -2374,6 +2477,76 @@ async def close_shift_confirm(
         reply_markup=main_keyboard,
     )
     await send_long_message(callback.message, report_text)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("finish_operator:"))
+async def finish_operator_from_shift(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer("Раздел доступен наладчику.")
+        await callback.answer()
+        return
+
+    work_session_id = int(callback.data.split(":", maxsplit=1)[1])
+    work = await work_session_service.finish_by_id(work_session_id, active.id)
+
+    if work is None:
+        await callback.message.answer("Оператор уже закрыт или смена не найдена.")
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        f"✅ Оператор закрыт.\n\n"
+        f"{work.machine.name}: {work.user.full_name}"
+    )
+    await show_shift_people(callback.message, active)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("finish_mechanic:"))
+async def finish_mechanic_from_shift(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer("Раздел доступен наладчику.")
+        await callback.answer()
+        return
+
+    mechanic_user_id = int(callback.data.split(":", maxsplit=1)[1])
+    mechanic_user = await user_service.get(mechanic_user_id)
+    removed = await shift_mechanic_service.remove(
+        active.id,
+        mechanic_user_id,
+    )
+
+    if not removed:
+        await callback.message.answer("Наладчик уже убран из смены.")
+        await callback.answer()
+        return
+
+    name = mechanic_user.full_name if mechanic_user else "Наладчик"
+    await callback.message.answer(f"✅ {name} убран из текущей смены.")
+    await show_shift_people(callback.message, active)
     await callback.answer()
 
 

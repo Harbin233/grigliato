@@ -160,6 +160,35 @@ class WorkSessionService:
 
             return True
 
+    async def finish_by_id(
+        self,
+        work_session_id: int,
+        shift_id: int,
+    ) -> WorkSession | None:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(WorkSession)
+                .options(
+                    selectinload(WorkSession.user),
+                    selectinload(WorkSession.machine),
+                )
+                .where(
+                    WorkSession.id == work_session_id,
+                    WorkSession.shift_id == shift_id,
+                    WorkSession.ended_at.is_(None),
+                )
+            )
+            work = result.scalar_one_or_none()
+
+            if work is None:
+                return None
+
+            work.ended_at = datetime.now()
+            await session.commit()
+            await session.refresh(work)
+
+            return work
+
     async def finish_by_shift(
         self,
         shift_id: int,
