@@ -670,6 +670,54 @@ async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def frequent_rails_keyboard(
+    machine_id: int,
+    frequent_rails,
+    *,
+    choose_callback: str,
+    catalog_callback: str,
+    back_callback: str,
+) -> InlineKeyboardMarkup:
+    rows = []
+
+    for machine_rail, entries_count, packs_count in frequent_rails:
+        if choose_callback == "prod_freq_rail":
+            callback_data = f"{choose_callback}:{machine_id}:{machine_rail.id}"
+        else:
+            callback_data = f"{choose_callback}:{machine_rail.rail_id}"
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        f"{machine_rail.rail.name} "
+                        f"({entries_count} раз / {packs_count} кор.)"
+                    ),
+                    callback_data=callback_data,
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📚 Выбрать из справочника",
+                callback_data=f"{catalog_callback}:{machine_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=back_callback,
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def production_machines_for_rail_keyboard(
     rail_id: int,
 ) -> InlineKeyboardMarkup:
@@ -2798,6 +2846,26 @@ async def my_machine_product_start(
         await callback.answer()
         return
 
+    frequent_rails = await production_service.get_frequent_rails_for_machine(
+        machine_id
+    )
+
+    if frequent_rails:
+        await state.clear()
+        await state.update_data(mprod_machine_id=machine_id)
+        await callback.message.answer(
+            "Частые рейки на этом станке:",
+            reply_markup=frequent_rails_keyboard(
+                machine_id,
+                frequent_rails,
+                choose_callback="mprod_confirm_rail",
+                catalog_callback="mprod_catalog",
+                back_callback=f"my_machine:{machine_id}",
+            ),
+        )
+        await callback.answer()
+        return
+
     machine_rails = await production_service.get_enabled_rails_for_machine(
         machine_id
     )
@@ -2841,6 +2909,24 @@ async def select_production_machine(
         return
 
     machine_id = int(callback.data.split(":", maxsplit=1)[1])
+    frequent_rails = await production_service.get_frequent_rails_for_machine(
+        machine_id
+    )
+
+    if frequent_rails:
+        await callback.message.answer(
+            "Частые рейки на этом станке:",
+            reply_markup=frequent_rails_keyboard(
+                machine_id,
+                frequent_rails,
+                choose_callback="prod_freq_rail",
+                catalog_callback="prod_catalog",
+                back_callback="nav:production_start",
+            ),
+        )
+        await callback.answer()
+        return
+
     keyboard_markup = await production_rails_keyboard(machine_id)
 
     if not keyboard_markup.inline_keyboard:
@@ -2854,6 +2940,67 @@ async def select_production_machine(
         "Выберите рейку:",
         reply_markup=keyboard_markup,
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_catalog:"))
+async def production_machine_catalog(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию добавляет наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+    keyboard_markup = await production_rails_keyboard(machine_id)
+
+    if not keyboard_markup.inline_keyboard:
+        await callback.message.answer(
+            "Для этого станка пока нет активных реек/ставок."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите рейку:",
+        reply_markup=keyboard_markup,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prod_freq_rail:"))
+async def select_frequent_production_rail(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(
+        callback.from_user.id
+    )
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await callback.message.answer(
+            "Продукцию добавляет наладчик или админ/мастер."
+        )
+        await callback.answer()
+        return
+
+    _, machine_id_raw, machine_rail_id_raw = callback.data.split(":")
+
+    await state.update_data(
+        machine_id=int(machine_id_raw),
+        machine_rail_id=int(machine_rail_id_raw),
+    )
+    await state.set_state(ProductionState.packs)
+    await callback.message.answer("Введите количество коробок целым числом:")
     await callback.answer()
 
 
@@ -2994,6 +3141,54 @@ async def select_machine_production_rail(
 ):
     rail_id = int(callback.data.split(":", maxsplit=1)[1])
     await start_machine_product_packs(callback, state, rail_id)
+
+
+@router.callback_query(F.data.startswith("mprod_catalog:"))
+async def machine_production_catalog(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    machine_id = int(callback.data.split(":", maxsplit=1)[1])
+
+    if not await ensure_machine_owner(user, active, machine_id):
+        await callback.message.answer(
+            "Этот станок не закреплен за вами в текущей смене."
+        )
+        await callback.answer()
+        return
+
+    machine_rails = await production_service.get_enabled_rails_for_machine(
+        machine_id
+    )
+
+    if not machine_rails:
+        await callback.message.answer(
+            "Для этого станка пока нет активных реек/ставок."
+        )
+        await callback.answer()
+        return
+
+    await state.update_data(
+        mprod_machine_id=machine_id,
+        mprod_filters={},
+        mprod_history=[],
+    )
+    await send_grouped_rails_step(
+        callback.message,
+        state,
+        mode="mprod",
+        rails=[machine_rail.rail for machine_rail in machine_rails],
+    )
+    await callback.answer()
 
 
 def rail_rates_text(rates) -> str:

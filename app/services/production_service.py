@@ -1,6 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import selectinload
 
 from app.db.session import SessionLocal
@@ -59,18 +59,90 @@ class ProductionService:
         machine_id: int,
     ) -> list[MachineRail]:
         async with SessionLocal() as session:
+            usage_subquery = (
+                select(
+                    ProductionEntry.rail_id.label("rail_id"),
+                    func.count(ProductionEntry.id).label("entries_count"),
+                    func.coalesce(
+                        func.sum(ProductionEntry.packs),
+                        0,
+                    ).label("packs_count"),
+                )
+                .where(
+                    ProductionEntry.machine_id == machine_id,
+                    ProductionEntry.is_deleted.is_(False),
+                )
+                .group_by(ProductionEntry.rail_id)
+                .subquery()
+            )
             result = await session.execute(
                 select(MachineRail)
                 .options(selectinload(MachineRail.rail))
+                .outerjoin(
+                    usage_subquery,
+                    usage_subquery.c.rail_id == MachineRail.rail_id,
+                )
                 .where(
                     MachineRail.machine_id == machine_id,
                     MachineRail.is_enabled.is_(True),
                 )
                 .join(MachineRail.rail)
-                .order_by(Rail.name)
+                .order_by(
+                    desc(func.coalesce(usage_subquery.c.entries_count, 0)),
+                    desc(func.coalesce(usage_subquery.c.packs_count, 0)),
+                    Rail.name,
+                )
             )
 
             return list(result.scalars().all())
+
+    async def get_frequent_rails_for_machine(
+        self,
+        machine_id: int,
+        limit: int = 10,
+    ) -> list[tuple[MachineRail, int, int]]:
+        async with SessionLocal() as session:
+            usage_subquery = (
+                select(
+                    ProductionEntry.rail_id.label("rail_id"),
+                    func.count(ProductionEntry.id).label("entries_count"),
+                    func.coalesce(
+                        func.sum(ProductionEntry.packs),
+                        0,
+                    ).label("packs_count"),
+                )
+                .where(
+                    ProductionEntry.machine_id == machine_id,
+                    ProductionEntry.is_deleted.is_(False),
+                )
+                .group_by(ProductionEntry.rail_id)
+                .subquery()
+            )
+            result = await session.execute(
+                select(
+                    MachineRail,
+                    usage_subquery.c.entries_count,
+                    usage_subquery.c.packs_count,
+                )
+                .options(selectinload(MachineRail.rail))
+                .join(usage_subquery, usage_subquery.c.rail_id == MachineRail.rail_id)
+                .join(MachineRail.rail)
+                .where(
+                    MachineRail.machine_id == machine_id,
+                    MachineRail.is_enabled.is_(True),
+                )
+                .order_by(
+                    desc(usage_subquery.c.entries_count),
+                    desc(usage_subquery.c.packs_count),
+                    Rail.name,
+                )
+                .limit(limit)
+            )
+
+            return [
+                (machine_rail, entries_count, packs_count)
+                for machine_rail, entries_count, packs_count in result.all()
+            ]
 
     async def get_enabled_machines_for_rail(
         self,
