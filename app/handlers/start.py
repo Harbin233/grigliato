@@ -295,7 +295,33 @@ def group_field_title(field: str) -> str:
     }.get(field, "Выберите:")
 
 
-def group_keyboard(prefix: str, field: str, values: list[str]) -> InlineKeyboardMarkup:
+def navigation_rows(prefix: str, show_back: bool) -> list[list[InlineKeyboardButton]]:
+    buttons = []
+
+    if show_back:
+        buttons.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"{prefix}:back",
+            )
+        )
+
+    buttons.append(
+        InlineKeyboardButton(
+            text="🏠 Сначала",
+            callback_data=f"{prefix}:reset",
+        )
+    )
+
+    return [buttons]
+
+
+def group_keyboard(
+    prefix: str,
+    field: str,
+    values: list[str],
+    show_back: bool,
+) -> InlineKeyboardMarkup:
     rows = []
 
     for index in range(0, len(values), 2):
@@ -309,10 +335,17 @@ def group_keyboard(prefix: str, field: str, values: list[str]) -> InlineKeyboard
             ]
         )
 
+    rows.extend(navigation_rows(prefix, show_back))
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def rails_keyboard(prefix: str, infos: list[RailInfo]) -> InlineKeyboardMarkup:
+def rails_keyboard(
+    prefix: str,
+    infos: list[RailInfo],
+    navigation_prefix: str,
+    show_back: bool,
+) -> InlineKeyboardMarkup:
     rows = []
 
     for info in infos:
@@ -325,6 +358,8 @@ def rails_keyboard(prefix: str, infos: list[RailInfo]) -> InlineKeyboardMarkup:
                 )
             ]
         )
+
+    rows.extend(navigation_rows(navigation_prefix, show_back))
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -339,9 +374,12 @@ async def send_grouped_rails_step(
     infos = [parse_catalog_rail(rail) for rail in rails]
     state_key = f"{mode}_filters"
     values_key = f"{mode}_values"
+    history_key = f"{mode}_history"
     prefix = "prodsel" if mode == "prod" else "catsel"
     rail_prefix = "prod_rail_first" if mode == "prod" else "catrail"
-    filters = (await state.get_data()).get(state_key, {})
+    data = await state.get_data()
+    filters = dict(data.get(state_key, {}))
+    history = data.get(history_key, [])
     filtered = filter_rail_infos(infos, filters)
 
     if not filtered:
@@ -353,7 +391,12 @@ async def send_grouped_rails_step(
     if field is None:
         await message.answer(
             "Выберите рейку:",
-            reply_markup=rails_keyboard(rail_prefix, filtered),
+            reply_markup=rails_keyboard(
+                rail_prefix,
+                filtered,
+                prefix,
+                bool(history),
+            ),
         )
         await state.update_data(**{state_key: filters, values_key: []})
         return
@@ -363,7 +406,7 @@ async def send_grouped_rails_step(
     await state.update_data(**{state_key: filters, values_key: values})
     await message.answer(
         group_field_title(field),
-        reply_markup=group_keyboard(prefix, field, values),
+        reply_markup=group_keyboard(prefix, field, values, bool(history)),
     )
 
 
@@ -873,7 +916,7 @@ async def add_production(
         )
         return
 
-    await state.update_data(prod_filters={})
+    await state.update_data(prod_filters={}, prod_history=[])
     await send_grouped_rails_step(
         message,
         state,
@@ -904,7 +947,7 @@ async def admin_mode(
     )
 
     if rails:
-        await state.update_data(cat_filters={})
+        await state.update_data(cat_filters={}, cat_history=[])
         await send_grouped_rails_step(
             message,
             state,
@@ -1381,8 +1424,44 @@ async def select_production_group(
         await callback.answer()
         return
 
-    _, field, index_raw = callback.data.split(":")
     data = await state.get_data()
+    action = callback.data.split(":", maxsplit=1)[1]
+
+    if action == "reset":
+        await state.update_data(prod_filters={}, prod_history=[])
+        rails = await production_service.get_enabled_rails()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="prod",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    if action == "back":
+        history = data.get("prod_history", [])
+
+        if not history:
+            await callback.answer("Это первый шаг.")
+            return
+
+        filters = history[-1]
+        await state.update_data(
+            prod_filters=filters,
+            prod_history=history[:-1],
+        )
+        rails = await production_service.get_enabled_rails()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="prod",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    _, field, index_raw = callback.data.split(":")
     values = data.get("prod_values", [])
     index = int(index_raw)
 
@@ -1390,9 +1469,11 @@ async def select_production_group(
         await callback.answer("Выбор устарел. Начните заново.")
         return
 
-    filters = data.get("prod_filters", {})
+    filters = dict(data.get("prod_filters", {}))
+    history = data.get("prod_history", [])
+    history.append(filters.copy())
     filters[field] = values[index]
-    await state.update_data(prod_filters=filters)
+    await state.update_data(prod_filters=filters, prod_history=history)
     rails = await production_service.get_enabled_rails()
     await send_grouped_rails_step(
         callback.message,
@@ -1416,8 +1497,44 @@ async def select_catalog_group(
         await callback.answer()
         return
 
-    _, field, index_raw = callback.data.split(":")
     data = await state.get_data()
+    action = callback.data.split(":", maxsplit=1)[1]
+
+    if action == "reset":
+        await state.update_data(cat_filters={}, cat_history=[])
+        rails = await rail_service.get_all()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="cat",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    if action == "back":
+        history = data.get("cat_history", [])
+
+        if not history:
+            await callback.answer("Это первый шаг.")
+            return
+
+        filters = history[-1]
+        await state.update_data(
+            cat_filters=filters,
+            cat_history=history[:-1],
+        )
+        rails = await rail_service.get_all()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="cat",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    _, field, index_raw = callback.data.split(":")
     values = data.get("cat_values", [])
     index = int(index_raw)
 
@@ -1425,9 +1542,11 @@ async def select_catalog_group(
         await callback.answer("Выбор устарел. Начните заново.")
         return
 
-    filters = data.get("cat_filters", {})
+    filters = dict(data.get("cat_filters", {}))
+    history = data.get("cat_history", [])
+    history.append(filters.copy())
     filters[field] = values[index]
-    await state.update_data(cat_filters=filters)
+    await state.update_data(cat_filters=filters, cat_history=history)
     rails = await rail_service.get_all()
     await send_grouped_rails_step(
         callback.message,
@@ -1595,7 +1714,7 @@ async def back_to_catalog_groups(
     state: FSMContext,
 ):
     rails = await rail_service.get_all()
-    await state.update_data(cat_filters={})
+    await state.update_data(cat_filters={}, cat_history=[])
     await send_grouped_rails_step(
         callback.message,
         state,
