@@ -37,7 +37,7 @@ def rows() -> list[dict]:
             "rates": [(["Г-1", "Г-2", "Г-4"], "167.85", "327.68")],
         },
         {
-            "rail_class": "GL",
+            "rail_class": "GL15",
             "shapes": ["Мама", "Папа"],
             "bases": ["30x30 h47 b15"],
             "length": "0.6",

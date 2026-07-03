@@ -205,7 +205,7 @@ class RailService:
             rail_class, _rail_shape, rail_base_name = parts
             allowed_shapes = {
                 "Эконом": {"Мама", "Папа", "Напр"},
-                "GL": {"Мама", "Папа", "L"},
+                "GL15": {"Мама", "Папа", "L"},
             }.get(rail_class, set())
 
             if target_shape not in allowed_shapes:
