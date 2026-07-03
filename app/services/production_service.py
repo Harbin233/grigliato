@@ -90,6 +90,27 @@ class ProductionService:
 
             return list(result.scalars().all())
 
+    async def get_enabled_machine_rail(
+        self,
+        machine_id: int,
+        rail_id: int,
+    ) -> MachineRail | None:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(MachineRail)
+                .options(
+                    selectinload(MachineRail.machine),
+                    selectinload(MachineRail.rail),
+                )
+                .where(
+                    MachineRail.machine_id == machine_id,
+                    MachineRail.rail_id == rail_id,
+                    MachineRail.is_enabled.is_(True),
+                )
+            )
+
+            return result.scalar_one_or_none()
+
     async def create_entry(
         self,
         shift: Shift,
@@ -171,6 +192,66 @@ class ProductionService:
                 mechanic_total,
                 payable_pieces,
             )
+
+    async def machine_shift_summary(
+        self,
+        shift_id: int,
+        machine_id: int,
+    ) -> dict:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(ProductionEntry, Rail)
+                    .join(Rail, ProductionEntry.rail_id == Rail.id)
+                    .where(
+                        ProductionEntry.shift_id == shift_id,
+                        ProductionEntry.machine_id == machine_id,
+                        ProductionEntry.is_deleted.is_(False),
+                    )
+                    .order_by(ProductionEntry.created_at)
+                )
+            ).all()
+
+            summary = {
+                "packs": 0,
+                "pieces": 0,
+                "meters": Decimal("0"),
+                "operator_total": Decimal("0"),
+                "mechanic_total": Decimal("0"),
+                "types": {},
+                "entries_count": len(rows),
+            }
+
+            for entry, rail in rows:
+                rail_type = rail.name.split(" ", maxsplit=1)[0]
+                type_summary = summary["types"].setdefault(
+                    rail_type,
+                    {
+                        "packs": 0,
+                        "pieces": 0,
+                        "meters": Decimal("0"),
+                        "operator_total": Decimal("0"),
+                        "mechanic_total": Decimal("0"),
+                    },
+                )
+
+                entry_meters = Decimal(str(entry.meters))
+                entry_operator_total = Decimal(str(entry.operator_total))
+                entry_mechanic_total = Decimal(str(entry.mechanic_total))
+
+                summary["packs"] += entry.packs
+                summary["pieces"] += entry.pieces
+                summary["meters"] += entry_meters
+                summary["operator_total"] += entry_operator_total
+                summary["mechanic_total"] += entry_mechanic_total
+
+                type_summary["packs"] += entry.packs
+                type_summary["pieces"] += entry.pieces
+                type_summary["meters"] += entry_meters
+                type_summary["operator_total"] += entry_operator_total
+                type_summary["mechanic_total"] += entry_mechanic_total
+
+            return summary
 
 
 production_service = ProductionService()
