@@ -87,7 +87,7 @@ RAIL_SHAPE_CODES = {
 }
 
 ECONOM_GUIDE_LENGTHS = ["0.6", "1.2", "2.40"]
-KNOWN_RAIL_CLASSES = ["Эконом", "GL", "Grigliato", "Пирамида"]
+KNOWN_RAIL_CLASSES = ["Эконом", "GL", "GL15", "Grigliato", "Пирамида"]
 KNOWN_RAIL_SHAPES = ["Мама", "Папа", "Напр", "L"]
 RAIL_GROUP_FIELDS = ["rail_class", "shape", "guide_length", "cell", "h", "b"]
 
