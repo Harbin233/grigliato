@@ -316,6 +316,25 @@ def navigation_rows(prefix: str, show_back: bool) -> list[list[InlineKeyboardBut
     return [buttons]
 
 
+def action_navigation_row(
+    *buttons: tuple[str, str],
+) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(text=text, callback_data=callback_data)
+        for text, callback_data in buttons
+    ]
+
+
+def with_action_navigation(
+    rows: list[list[InlineKeyboardButton]],
+    *buttons: tuple[str, str],
+) -> InlineKeyboardMarkup:
+    if buttons:
+        rows.append(action_navigation_row(*buttons))
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def group_keyboard(
     prefix: str,
     field: str,
@@ -459,8 +478,7 @@ def create_related_shapes_keyboard(
     source_rail_id: int,
     missing_shapes: list[str],
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
             [
                 InlineKeyboardButton(
                     text=f"Создать {shape} с теми же параметрами",
@@ -471,27 +489,32 @@ def create_related_shapes_keyboard(
             ]
             for shape in missing_shapes
         ]
+
+    return with_action_navigation(
+        rows,
+        ("↩️ В справочник", "nav:admin_start"),
     )
 
 
 def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     suffix = "1" if is_overtime else "0"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return with_action_navigation(
+        [
             [
                 InlineKeyboardButton(
                     text="🚀 Открыть смену",
                     callback_data=f"open_shift:{suffix}",
                 )
             ]
-        ]
+        ],
+        ("↩️ В меню", "nav:main"),
     )
 
 
 def mechanic_type_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     suffix = "1" if is_overtime else "0"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return with_action_navigation(
+        [
             [
                 InlineKeyboardButton(
                     text="Основной",
@@ -502,7 +525,8 @@ def mechanic_type_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
                     callback_data=f"mechanic_type:assistant:{suffix}",
                 ),
             ]
-        ]
+        ],
+        ("↩️ В меню", "nav:main"),
     )
 
 
@@ -522,7 +546,10 @@ async def machines_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_action_navigation(
+        rows,
+        ("↩️ В меню", "nav:main"),
+    )
 
 
 async def production_machines_keyboard() -> InlineKeyboardMarkup:
@@ -540,7 +567,10 @@ async def production_machines_keyboard() -> InlineKeyboardMarkup:
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_action_navigation(
+        rows,
+        ("↩️ В меню", "nav:main"),
+    )
 
 
 async def production_all_rails_keyboard() -> InlineKeyboardMarkup:
@@ -557,7 +587,10 @@ async def production_all_rails_keyboard() -> InlineKeyboardMarkup:
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_action_navigation(
+        rows,
+        ("↩️ В меню", "nav:main"),
+    )
 
 
 async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
@@ -576,7 +609,11 @@ async def production_rails_keyboard(machine_id: int) -> InlineKeyboardMarkup:
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_action_navigation(
+        rows,
+        ("⬅️ Назад", "nav:production_start"),
+        ("↩️ В меню", "nav:main"),
+    )
 
 
 async def production_machines_for_rail_keyboard(
@@ -601,7 +638,11 @@ async def production_machines_for_rail_keyboard(
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_action_navigation(
+        rows,
+        ("⬅️ К рейкам", "nav:prod_current"),
+        ("🏠 Сначала", "prodsel:reset"),
+    )
 
 
 def parse_machine_rate(text: str) -> tuple[Decimal, Decimal] | None:
@@ -1557,6 +1598,98 @@ async def select_catalog_group(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("nav:"))
+async def inline_navigation(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    action = callback.data.split(":", maxsplit=1)[1]
+
+    if action == "main":
+        await state.clear()
+        await callback.message.answer(
+            "Главное меню.",
+            reply_markup=main_keyboard,
+        )
+        await callback.answer()
+        return
+
+    if action == "production_start":
+        user = await user_service.get_by_telegram_id(callback.from_user.id)
+        user = await ensure_admin_role(user)
+
+        if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+            await callback.message.answer(
+                "Продукцию записывает наладчик или админ/мастер."
+            )
+            await callback.answer()
+            return
+
+        await state.clear()
+        rails = await production_service.get_enabled_rails()
+
+        if not rails:
+            await callback.message.answer(
+                "В справочнике пока нет активных реек со ставками.\n\n"
+                "Откройте «📚 Справочник реек» и добавьте рейку."
+            )
+            await callback.answer()
+            return
+
+        await state.update_data(prod_filters={}, prod_history=[])
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="prod",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    if action == "prod_current":
+        user = await user_service.get_by_telegram_id(callback.from_user.id)
+        user = await ensure_admin_role(user)
+
+        if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+            await callback.message.answer(
+                "Продукцию записывает наладчик или админ/мастер."
+            )
+            await callback.answer()
+            return
+
+        rails = await production_service.get_enabled_rails()
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="prod",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    if action == "admin_start":
+        user = await user_service.get_by_telegram_id(callback.from_user.id)
+        user = await ensure_admin_role(user)
+
+        if user is None or user.role != UserRole.ADMIN:
+            await callback.message.answer("Справочник доступен админу/мастеру.")
+            await callback.answer()
+            return
+
+        rails = await rail_service.get_all()
+        await state.update_data(cat_filters={}, cat_history=[])
+        await send_grouped_rails_step(
+            callback.message,
+            state,
+            mode="cat",
+            rails=rails,
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Неизвестное действие.")
+
+
 @router.callback_query(F.data.startswith("prod_machine:"))
 async def select_production_machine(
     callback: CallbackQuery,
@@ -1987,6 +2120,14 @@ async def input_production_packs(
     if active is None:
         await message.answer("Смена не открыта.")
         await state.clear()
+        return
+
+    if message.text == "↩️ Назад":
+        await state.clear()
+        await message.answer(
+            "Главное меню.",
+            reply_markup=main_keyboard,
+        )
         return
 
     if not message.text or not message.text.strip().isdigit():
