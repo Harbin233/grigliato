@@ -218,16 +218,16 @@ def rails_list_text(rails, limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-def parse_catalog_rail(rail) -> RailInfo:
+def parse_catalog_rail(rail) -> RailInfo | None:
     name = rail.name
     parts = name.split()
-    rail_class = "Прочее"
     shape = "Без вида"
-    offset = 0
 
-    if parts and parts[0] in KNOWN_RAIL_CLASSES:
-        rail_class = parts[0]
-        offset = 1
+    if not parts or parts[0] not in KNOWN_RAIL_CLASSES:
+        return None
+
+    rail_class = parts[0]
+    offset = 1
 
     if len(parts) > offset and parts[offset] in KNOWN_RAIL_SHAPES:
         shape = parts[offset]
@@ -410,7 +410,11 @@ async def send_grouped_rails_step(
     mode: str,
     rails,
 ) -> None:
-    infos = [parse_catalog_rail(rail) for rail in rails]
+    infos = [
+        info
+        for rail in rails
+        if (info := parse_catalog_rail(rail)) is not None
+    ]
     state_key = f"{mode}_filters"
     values_key = f"{mode}_values"
     history_key = f"{mode}_history"
