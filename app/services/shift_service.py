@@ -8,6 +8,17 @@ from app.models.shift import Shift, ShiftType
 from app.models.user import User, UserRole
 
 
+def shift_matches_resolved(
+    shift: Shift,
+    resolved,
+) -> bool:
+    return (
+        shift.work_date == resolved.work_date
+        and shift.shift_type == resolved.shift_type
+        and shift.shift_number == resolved.shift_number
+    )
+
+
 class ShiftService:
 
     async def get_active_shift(
@@ -32,14 +43,13 @@ class ShiftService:
     ) -> tuple[bool, str]:
 
         active = await self.get_active_shift()
+        resolved = resolve_shift()
 
-        if active:
+        if active and shift_matches_resolved(active, resolved):
             return (
                 True,
                 f"Смена №{active.shift_number} уже открыта."
             )
-
-        resolved = resolve_shift()
 
         if user.role == UserRole.OPERATOR:
             return (
@@ -59,6 +69,9 @@ class ShiftService:
             )
 
         async with SessionLocal() as session:
+            if active:
+                db_active = await session.get(Shift, active.id)
+                db_active.ended_at = datetime.now()
 
             shift = Shift(
                 work_date=resolved.work_date,

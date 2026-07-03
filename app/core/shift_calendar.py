@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
+from app.core.config import settings
 from app.models.shift import ShiftType
 
 BASE_DATE = date(2026, 6, 25)
@@ -36,8 +38,12 @@ def get_shift_numbers_for_date(work_date: date) -> tuple[int, int]:
 
 
 def resolve_shift(now: datetime | None = None) -> ResolvedShift:
+    timezone = ZoneInfo(settings.TIMEZONE)
+
     if now is None:
-        now = datetime.now()
+        now = datetime.now(timezone)
+    elif now.tzinfo is not None:
+        now = now.astimezone(timezone)
 
     current_date = now.date()
     current_time = now.time()
