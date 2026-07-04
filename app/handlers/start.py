@@ -1,5 +1,8 @@
 import re
+from calendar import monthrange
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
@@ -14,6 +17,7 @@ from aiogram.types import (
 )
 
 from app.core.config import settings
+from app.core.shift_calendar import get_shift_numbers_for_date
 from app.models.shift_mechanic import MechanicType
 from app.models.user import UserRole
 from app.services.active_machine_rail_service import active_machine_rail_service
@@ -149,14 +153,18 @@ shift_keyboard = keyboard([
 
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
-    ["🛠 Мои станки"],
+    ["➕ Записать продукцию", "🛠 Мои станки"],
+    ["📅 Календарь смен", "📂 Еще"],
+])
+
+more_keyboard = keyboard([
     ["👥 Люди смены"],
-    ["➕ Записать продукцию"],
     ["🧮 Тестовый просчет"],
     ["✅ Закрыть смену"],
+    ["🕒 Подработка"],
     ["📚 Справочник реек"],
     ["⚙️ Админ режим"],
-    ["🕒 Подработка"],
+    ["↩️ Назад"],
 ])
 
 admin_keyboard = keyboard([
@@ -250,8 +258,8 @@ def parse_catalog_rail(rail) -> RailInfo | None:
 
     base_name = " ".join(base_parts) if base_parts else name
     cell_match = re.search(r"\d+x\d+", base_name)
-    h_match = re.search(r"\bh\d+\b", base_name)
-    b_match = re.search(r"\bb\d+\b", base_name)
+    h_match = re.search(r"\bh\d+(?:\.\d+)?\b", base_name)
+    b_match = re.search(r"\bb\d+(?:\.\d+)?\b", base_name)
 
     return RailInfo(
         rail=rail,
@@ -408,6 +416,110 @@ def production_rail_confirm_keyboard(
                 ),
             ]
         ]
+    )
+
+
+MONTH_NAMES = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
+
+
+def local_today() -> date:
+    return datetime.now(ZoneInfo(settings.TIMEZONE)).date()
+
+
+def shift_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    prev_year, prev_month = shift_month(year, month, -1)
+    next_year, next_month = shift_month(year, month, 1)
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"calendar:{prev_year}:{prev_month}",
+                ),
+                InlineKeyboardButton(
+                    text="Сегодня",
+                    callback_data="calendar:today",
+                ),
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"calendar:{next_year}:{next_month}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 В меню",
+                    callback_data="nav:main",
+                )
+            ],
+        ]
+    )
+
+
+def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    month += delta
+
+    while month < 1:
+        year -= 1
+        month += 12
+
+    while month > 12:
+        year += 1
+        month -= 12
+
+    return year, month
+
+
+def render_shift_calendar(year: int, month: int) -> str:
+    today = local_today()
+    first_weekday, days_count = monthrange(year, month)
+    cells = [""] * first_weekday
+
+    for day in range(1, days_count + 1):
+        day_shift, night_shift = get_shift_numbers_for_date(
+            date(year, month, day)
+        )
+        day_text = f"{day:02d}"
+
+        if today == date(year, month, day):
+            day_text = f"[{day_text}]"
+
+        cells.append(f"{day_text}:{day_shift}/{night_shift}")
+
+    while len(cells) % 7:
+        cells.append("")
+
+    lines = [
+        f"📅 {MONTH_NAMES[month]} {year}",
+        "Формат: дата:дневная/ночная смена",
+        "",
+        "Пн       Вт       Ср       Чт       Пт       Сб       Вс",
+    ]
+
+    for index in range(0, len(cells), 7):
+        row = cells[index:index + 7]
+        lines.append(" ".join(f"{cell:^8}" for cell in row).rstrip())
+
+    return "\n".join(lines)
+
+
+async def send_shift_calendar(message: Message, year: int, month: int) -> None:
+    await message.answer(
+        render_shift_calendar(year, month),
+        reply_markup=shift_calendar_keyboard(year, month),
     )
 
 
@@ -1163,6 +1275,28 @@ async def start_work(
     message: Message,
 ):
     await handle_work_start(message, is_overtime=False)
+
+
+@router.message(F.text == "📂 Еще")
+async def more_menu(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "Дополнительное меню.",
+        reply_markup=more_keyboard,
+    )
+
+
+@router.message(F.text == "📅 Календарь смен")
+async def shift_calendar_menu(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    today = local_today()
+    await send_shift_calendar(message, today.year, today.month)
 
 
 @router.message(F.text == "🕒 Подработка")
@@ -2595,6 +2729,27 @@ async def select_machine_production_group(
         mode="mprod",
         rails=[machine_rail.rail for machine_rail in machine_rails],
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("calendar:"))
+async def shift_calendar_callback(
+    callback: CallbackQuery,
+):
+    payload = callback.data.split(":")
+
+    if len(payload) == 2 and payload[1] == "today":
+        today = local_today()
+        year = today.year
+        month = today.month
+    elif len(payload) == 3:
+        year = int(payload[1])
+        month = int(payload[2])
+    else:
+        await callback.answer()
+        return
+
+    await send_shift_calendar(callback.message, year, month)
     await callback.answer()
 
 
