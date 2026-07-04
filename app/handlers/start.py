@@ -29,11 +29,12 @@ from app.services.shift_mechanic_service import shift_mechanic_service
 from app.services.shift_service import shift_service
 from app.services.user_service import user_service
 from app.services.work_session_service import work_session_service
-from app.states.admin import AdminRailState
+from app.states.admin import AdminRailState, ManualOperatorState
 from app.states.production import ProductionState
 from app.states.register import RegisterState
 
 router = Router()
+ADMIN_CONTACT = "@buyan44ik"
 
 
 def keyboard(buttons: list[list[str]]) -> ReplyKeyboardMarkup:
@@ -68,6 +69,22 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
         buttons.insert(0, ["🛠 Админ / мастер"])
 
     return keyboard(buttons)
+
+
+async def notify_admins(bot, text: str) -> None:
+    admins = await user_service.get_admins()
+    telegram_ids = {
+        admin.telegram_id
+        for admin in admins
+        if admin.telegram_id > 0
+    }
+    telegram_ids.update(settings.admin_ids)
+
+    for telegram_id in telegram_ids:
+        try:
+            await bot.send_message(telegram_id, text)
+        except Exception:
+            pass
 
 
 RAIL_CLASSES = {
@@ -159,6 +176,7 @@ main_keyboard = keyboard([
 
 more_keyboard = keyboard([
     ["👥 Люди смены"],
+    ["👤 Добавить оператора"],
     ["🧮 Тестовый просчет"],
     ["✅ Закрыть смену"],
     ["🕒 Подработка"],
@@ -1299,6 +1317,27 @@ async def shift_calendar_menu(
     await send_shift_calendar(message, today.year, today.month)
 
 
+@router.message(F.text == "👤 Добавить оператора")
+async def manual_operator_start(
+    message: Message,
+    state: FSMContext,
+):
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer(
+            "Оператора вручную добавляет наладчик или админ/мастер."
+        )
+        return
+
+    await state.set_state(ManualOperatorState.full_name)
+    await message.answer(
+        "Введите ФИО оператора.",
+        reply_markup=keyboard([["↩️ Назад"]]),
+    )
+
+
 @router.message(F.text == "🕒 Подработка")
 async def start_overtime_work(
     message: Message,
@@ -1975,6 +2014,79 @@ async def back_to_main(
     await message.answer(
         "Главное меню.",
         reply_markup=main_keyboard,
+    )
+
+
+@router.message(ManualOperatorState.full_name)
+async def manual_operator_name(
+    message: Message,
+    state: FSMContext,
+):
+    full_name = (message.text or "").strip()
+
+    if len(full_name.split()) < 2:
+        await message.answer("Введите хотя бы фамилию и имя.")
+        return
+
+    await state.update_data(manual_operator_full_name=full_name)
+    await state.set_state(ManualOperatorState.shift)
+    await message.answer(
+        "Выберите смену оператора:",
+        reply_markup=shift_keyboard,
+    )
+
+
+@router.message(ManualOperatorState.shift)
+async def manual_operator_shift(
+    message: Message,
+    state: FSMContext,
+):
+    if message.text not in ("1", "2", "3", "4"):
+        await message.answer("Выберите смену кнопкой.")
+        return
+
+    creator = await user_service.get_by_telegram_id(message.from_user.id)
+    creator = await ensure_admin_role(creator)
+
+    if creator is None or creator.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        await message.answer("Недостаточно прав.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    full_name = data["manual_operator_full_name"]
+    shift_number = int(message.text)
+    matches = await user_service.find_name_matches(full_name)
+    operator = await user_service.create_manual_operator(
+        full_name,
+        shift_number,
+    )
+    await state.clear()
+
+    await message.answer(
+        "✅ Оператор добавлен вручную.\n\n"
+        f"ФИО: {operator.full_name}\n"
+        f"Смена №{operator.shift_number}",
+        reply_markup=main_keyboard,
+    )
+
+    matches_text = (
+        "\n\nВозможные совпадения:\n"
+        + "\n".join(
+            f"- #{match.id} {match.full_name}, {role_text(match.role)}, "
+            f"смена №{match.shift_number}"
+            for match in matches
+        )
+        if matches
+        else ""
+    )
+    await notify_admins(
+        message.bot,
+        "👤 Оператор добавлен вручную.\n\n"
+        f"ФИО: {operator.full_name}\n"
+        f"Смена №{operator.shift_number}\n"
+        f"Добавил: {creator.full_name}"
+        f"{matches_text}",
     )
 
 
@@ -4612,6 +4724,10 @@ async def input_shift(
         role=data["role"],
         shift_number=int(message.text),
     )
+    matches = await user_service.find_name_matches(
+        user.full_name,
+        exclude_user_id=user.id,
+    )
 
     await state.clear()
 
@@ -4621,4 +4737,24 @@ async def input_shift(
         f"Роль: {role_text(user.role)}\n"
         f"Смена №{user.shift_number}",
         reply_markup=main_keyboard,
+    )
+
+    matches_text = (
+        "\n\nВозможные совпадения:\n"
+        + "\n".join(
+            f"- #{match.id} {match.full_name}, {role_text(match.role)}, "
+            f"смена №{match.shift_number}"
+            for match in matches
+        )
+        if matches
+        else ""
+    )
+    await notify_admins(
+        message.bot,
+        "🆕 Новый пользователь зарегистрировался.\n\n"
+        f"ФИО: {user.full_name}\n"
+        f"Роль: {role_text(user.role)}\n"
+        f"Смена №{user.shift_number}\n"
+        f"Telegram ID: {user.telegram_id}"
+        f"{matches_text}",
     )

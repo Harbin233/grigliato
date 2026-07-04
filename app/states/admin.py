@@ -10,3 +10,8 @@ class AdminRailState(StatesGroup):
     machine_rate = State()
     edit_rail_params = State()
     edit_machine_rate = State()
+
+
+class ManualOperatorState(StatesGroup):
+    full_name = State()
+    shift = State()
