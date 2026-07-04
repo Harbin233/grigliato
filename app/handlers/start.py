@@ -560,6 +560,25 @@ def shift_calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     )
 
 
+def overtime_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🕒 Подработка",
+                    callback_data="overtime_start",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 В меню",
+                    callback_data="nav:main",
+                )
+            ],
+        ]
+    )
+
+
 def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     month += delta
 
@@ -1536,7 +1555,8 @@ async def handle_work_start(
         await message.answer(
             f"Сейчас открыта смена №{active.shift_number}, "
             f"а Ваша смена №{user.shift_number}.\n\n"
-            "Если выходите не в свою смену, нажмите «🕒 Подработка»."
+            "Если выходите не в свою смену, нажмите «🕒 Подработка».",
+            reply_markup=overtime_inline_keyboard(),
         )
         return
 
@@ -3226,6 +3246,84 @@ async def report_callback(
         await callback.answer()
         return
 
+    await callback.answer()
+
+
+@router.callback_query(F.data == "overtime_start")
+async def overtime_start_callback(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await callback.message.answer("Сначала зарегистрируйтесь.")
+        await callback.answer()
+        return
+
+    active = await shift_service.get_active_shift()
+
+    if active is None:
+        if can_manage_shift(user):
+            await callback.message.answer(
+                "Смена еще не открыта.",
+                reply_markup=shift_open_keyboard(True),
+            )
+            await callback.answer()
+            return
+
+        await callback.message.answer(
+            "Смена еще не открыта.\n"
+            "Дождитесь наладчика или админа."
+        )
+        await callback.answer()
+        return
+
+    if user.role == UserRole.ADMIN:
+        await callback.message.answer(
+            "✅ Админ-режим активен.\n\n"
+            f"Открыта смена №{active.shift_number}."
+        )
+        await callback.answer()
+        return
+
+    if is_mechanic_role(user):
+        assigned_mechanic = await shift_mechanic_service.get_by_shift_and_user(
+            active.id,
+            user.id,
+        )
+
+        if assigned_mechanic is None or user.role == UserRole.MECHANIC:
+            await prompt_mechanic_status(
+                callback.message,
+                active,
+                user,
+                True,
+            )
+            await callback.answer()
+            return
+
+    if not can_work_as_operator(user):
+        await callback.message.answer("Подработка доступна оператору или наладчику-оператору.")
+        await callback.answer()
+        return
+
+    active_work = await work_session_service.get_active(user.id)
+
+    if active_work:
+        overtime_text = "\nПодработка: да" if active_work.is_overtime else ""
+        await callback.message.answer(
+            "✅ Вы уже приступили к работе.\n\n"
+            f"Станок: {active_work.machine.name}"
+            f"{overtime_text}"
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Выберите станок для подработки:",
+        reply_markup=await machines_keyboard(True),
+    )
     await callback.answer()
 
 
@@ -4939,7 +5037,14 @@ async def open_shift(
         allow_overtime=is_overtime,
     )
 
-    await callback.message.answer(text)
+    await callback.message.answer(
+        text,
+        reply_markup=(
+            overtime_inline_keyboard()
+            if not ok and "подработ" in text.lower()
+            else None
+        ),
+    )
 
     if ok and is_mechanic_role(user):
         active = await shift_service.get_active_shift()
@@ -5060,7 +5165,8 @@ async def select_machine(
         await callback.message.answer(
             f"Сейчас открыта смена №{active.shift_number}, "
             f"а Ваша смена №{user.shift_number}.\n\n"
-            "Если выходите не в свою смену, нажмите «🕒 Подработка»."
+            "Если выходите не в свою смену, нажмите «🕒 Подработка».",
+            reply_markup=overtime_inline_keyboard(),
         )
         await callback.answer()
         return
