@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
 from app.db.session import SessionLocal
 from app.models.user import User, UserRole
@@ -120,6 +120,99 @@ class UserService:
         )
 
         return [user for _, user in matches[:limit]]
+
+    async def merge_manual_user(
+        self,
+        source_user_id: int,
+        target_user_id: int,
+    ) -> tuple[bool, str]:
+        from app.models.active_machine_rail import ActiveMachineRail
+        from app.models.production_entry import ProductionEntry
+        from app.models.shift import Shift
+        from app.models.shift_machine_assignment import ShiftMachineAssignment
+        from app.models.shift_mechanic import ShiftMechanic
+        from app.models.work_session import WorkSession
+
+        if source_user_id == target_user_id:
+            return False, "Нельзя объединить пользователя с самим собой."
+
+        async with SessionLocal() as session:
+            source = await session.get(User, source_user_id)
+            target = await session.get(User, target_user_id)
+
+            if source is None or target is None:
+                return False, "Пользователь не найден."
+
+            if source.telegram_id >= 0:
+                return False, "Исходный пользователь не является ручной записью."
+
+            if target.telegram_id <= 0:
+                return False, "Целевой пользователь должен быть зарегистрирован в Telegram."
+
+            await session.execute(
+                update(ProductionEntry)
+                .where(ProductionEntry.operator_id == source.id)
+                .values(
+                    operator_id=target.id,
+                    operator_name=target.full_name,
+                )
+            )
+            await session.execute(
+                update(WorkSession)
+                .where(WorkSession.user_id == source.id)
+                .values(user_id=target.id)
+            )
+            await session.execute(
+                update(ShiftMachineAssignment)
+                .where(ShiftMachineAssignment.user_id == source.id)
+                .values(user_id=target.id)
+            )
+            await session.execute(
+                update(Shift)
+                .where(Shift.started_by_id == source.id)
+                .values(started_by_id=target.id)
+            )
+            await session.execute(
+                update(ActiveMachineRail)
+                .where(ActiveMachineRail.created_by_id == source.id)
+                .values(created_by_id=target.id)
+            )
+
+            source_mechanics = (
+                await session.execute(
+                    select(ShiftMechanic).where(
+                        ShiftMechanic.user_id == source.id
+                    )
+                )
+            ).scalars().all()
+
+            for source_mechanic in source_mechanics:
+                existing = (
+                    await session.execute(
+                        select(ShiftMechanic).where(
+                            ShiftMechanic.shift_id == source_mechanic.shift_id,
+                            ShiftMechanic.user_id == target.id,
+                        )
+                    )
+                ).scalar_one_or_none()
+
+                if existing:
+                    await session.execute(
+                        delete(ShiftMechanic).where(
+                            ShiftMechanic.id == source_mechanic.id
+                        )
+                    )
+                    continue
+
+                source_mechanic.user_id = target.id
+
+            source.is_active = False
+            await session.commit()
+
+            return (
+                True,
+                f"{source.full_name} объединён с {target.full_name}.",
+            )
 
     async def create_manual_operator(
         self,

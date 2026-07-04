@@ -91,6 +91,34 @@ def block_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def new_user_admin_keyboard(
+    user_id: int,
+    manual_matches,
+) -> InlineKeyboardMarkup:
+    rows = []
+
+    for match in manual_matches[:5]:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🔗 Объединить с #{match.id} {match.full_name}",
+                    callback_data=f"merge_user:{match.id}:{user_id}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🚫 Заблокировать",
+                callback_data=f"block_user:{user_id}",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def notify_admins(
     bot,
     text: str,
@@ -2933,6 +2961,29 @@ async def block_registered_user(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("merge_user:"))
+async def merge_manual_user(
+    callback: CallbackQuery,
+):
+    admin = await user_service.get_by_telegram_id(callback.from_user.id)
+    admin = await ensure_admin_role(admin)
+
+    if admin is None or admin.role != UserRole.ADMIN:
+        await callback.answer("Только админ может объединять.", show_alert=True)
+        return
+
+    _, source_id_raw, target_id_raw = callback.data.split(":")
+    ok, text = await user_service.merge_manual_user(
+        int(source_id_raw),
+        int(target_id_raw),
+    )
+
+    await callback.message.answer(
+        ("✅ " if ok else "⚠️ ") + text
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("nav:"))
 async def inline_navigation(
     callback: CallbackQuery,
@@ -4817,6 +4868,11 @@ async def input_shift(
         user.full_name,
         exclude_user_id=user.id,
     )
+    manual_matches = [
+        match
+        for match in matches
+        if match.telegram_id < 0
+    ]
 
     await state.clear()
 
@@ -4846,5 +4902,5 @@ async def input_shift(
         f"Смена №{user.shift_number}\n"
         f"Telegram ID: {user.telegram_id}"
         f"{matches_text}",
-        reply_markup=block_user_keyboard(user.id),
+        reply_markup=new_user_admin_keyboard(user.id, manual_matches),
     )
