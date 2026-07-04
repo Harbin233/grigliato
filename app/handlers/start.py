@@ -226,6 +226,7 @@ shift_keyboard = keyboard([
 
 main_keyboard = keyboard([
     ["▶ Приступил к работе"],
+    ["🆘 SOS"],
     ["➕ Записать продукцию", "🛠 Мои станки"],
     ["📅 Календарь смен", "📂 Еще"],
 ])
@@ -1378,6 +1379,69 @@ async def shift_calendar_menu(
     await state.clear()
     today = local_today()
     await send_shift_calendar(message, today.year, today.month)
+
+
+@router.message(F.text == "🆘 SOS")
+async def operator_sos(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    user = await user_service.get_by_telegram_id(message.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await message.answer("Сначала зарегистрируйтесь.")
+        return
+
+    if user.role != UserRole.OPERATOR:
+        await message.answer("SOS по станку доступен оператору.")
+        return
+
+    active_work = await work_session_service.get_active(user.id)
+
+    if active_work is None:
+        await message.answer(
+            "Вы ещё не выбрали станок.\n\n"
+            "Нажмите «▶ Приступил к работе» и выберите станок."
+        )
+        return
+
+    assignment = await shift_machine_service.get_machine_assignment(
+        active_work.shift_id,
+        active_work.machine_id,
+    )
+    sos_text = (
+        "🆘 SOS от оператора\n\n"
+        f"Оператор: {user.full_name}\n"
+        f"Станок: {active_work.machine.name}\n"
+        f"Смена №{active_work.shift.shift_number}\n\n"
+        "Оператор сообщает, что со станком что-то не так."
+    )
+
+    if assignment and assignment.user.telegram_id > 0:
+        try:
+            await message.bot.send_message(
+                assignment.user.telegram_id,
+                sos_text,
+            )
+            await message.answer(
+                "🆘 SOS отправлен наладчику.\n\n"
+                f"Наладчик: {assignment.user.full_name}"
+            )
+            return
+        except Exception:
+            pass
+
+    await notify_admins(
+        message.bot,
+        sos_text
+        + "\n\nНаладчик не найден или пуш ему не доставлен.",
+    )
+    await message.answer(
+        "🆘 SOS отправлен админу.\n\n"
+        "Для этого станка не найден доступный наладчик."
+    )
 
 
 @router.message(F.text == "📊 Отчеты")
