@@ -13,6 +13,17 @@ class UserService:
         async with SessionLocal() as session:
             result = await session.execute(
                 select(User).where(
+                    User.telegram_id == telegram_id,
+                    User.is_active.is_(True),
+                )
+            )
+
+            return result.scalar_one_or_none()
+
+    async def get_any_by_telegram_id(self, telegram_id: int):
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(User).where(
                     User.telegram_id == telegram_id
                 )
             )
@@ -24,6 +35,19 @@ class UserService:
             user = await session.get(User, user_id)
             user.role = role
 
+            await session.commit()
+            await session.refresh(user)
+
+            return user
+
+    async def set_active(self, user_id: int, is_active: bool):
+        async with SessionLocal() as session:
+            user = await session.get(User, user_id)
+
+            if user is None:
+                return None
+
+            user.is_active = is_active
             await session.commit()
             await session.refresh(user)
 

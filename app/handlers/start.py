@@ -71,7 +71,31 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
     return keyboard(buttons)
 
 
-async def notify_admins(bot, text: str) -> None:
+def blocked_access_text() -> str:
+    return (
+        "Доступ к боту закрыт.\n\n"
+        f"Для получения доступа обратитесь к админу: {ADMIN_CONTACT}"
+    )
+
+
+def block_user_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚫 Заблокировать",
+                    callback_data=f"block_user:{user_id}",
+                )
+            ]
+        ]
+    )
+
+
+async def notify_admins(
+    bot,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
     admins = await user_service.get_admins()
     telegram_ids = {
         admin.telegram_id
@@ -82,7 +106,11 @@ async def notify_admins(bot, text: str) -> None:
 
     for telegram_id in telegram_ids:
         try:
-            await bot.send_message(telegram_id, text)
+            await bot.send_message(
+                telegram_id,
+                text,
+                reply_markup=reply_markup,
+            )
         except Exception:
             pass
 
@@ -1263,9 +1291,15 @@ async def cmd_start(
     message: Message,
     state: FSMContext,
 ):
-    user = await user_service.get_by_telegram_id(
+    user = await user_service.get_any_by_telegram_id(
         message.from_user.id
     )
+
+    if user and not user.is_active:
+        await state.clear()
+        await message.answer(blocked_access_text())
+        return
+
     user = await ensure_admin_role(user)
 
     if user:
@@ -2862,6 +2896,40 @@ async def shift_calendar_callback(
         return
 
     await send_shift_calendar(callback.message, year, month)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("block_user:"))
+async def block_registered_user(
+    callback: CallbackQuery,
+):
+    admin = await user_service.get_by_telegram_id(callback.from_user.id)
+    admin = await ensure_admin_role(admin)
+
+    if admin is None or admin.role != UserRole.ADMIN:
+        await callback.answer("Только админ может блокировать.", show_alert=True)
+        return
+
+    user_id = int(callback.data.split(":", maxsplit=1)[1])
+    target = await user_service.set_active(user_id, False)
+
+    if target is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+
+    if target.telegram_id > 0:
+        try:
+            await callback.bot.send_message(
+                target.telegram_id,
+                blocked_access_text(),
+            )
+        except Exception:
+            pass
+
+    await callback.message.answer(
+        "🚫 Пользователь заблокирован.\n\n"
+        f"ФИО: {target.full_name}"
+    )
     await callback.answer()
 
 
@@ -4662,6 +4730,13 @@ async def start_registration(
     message: Message,
     state: FSMContext,
 ):
+    user = await user_service.get_any_by_telegram_id(message.from_user.id)
+
+    if user and not user.is_active:
+        await state.clear()
+        await message.answer(blocked_access_text())
+        return
+
     await state.set_state(RegisterState.full_name)
 
     await message.answer("Введите Ваше ФИО.")
@@ -4717,6 +4792,20 @@ async def input_shift(
         return
 
     data = await state.get_data()
+    existing_user = await user_service.get_any_by_telegram_id(message.from_user.id)
+
+    if existing_user:
+        await state.clear()
+
+        if not existing_user.is_active:
+            await message.answer(blocked_access_text())
+            return
+
+        await message.answer(
+            "Вы уже зарегистрированы.",
+            reply_markup=main_keyboard,
+        )
+        return
 
     user = await user_service.create(
         telegram_id=message.from_user.id,
@@ -4757,4 +4846,5 @@ async def input_shift(
         f"Смена №{user.shift_number}\n"
         f"Telegram ID: {user.telegram_id}"
         f"{matches_text}",
+        reply_markup=block_user_keyboard(user.id),
     )
