@@ -9,6 +9,7 @@ from app.models.machine_rail import MachineRail
 from app.models.production_entry import ProductionEntry
 from app.models.rail import Rail
 from app.models.shift import Shift
+from app.models.shift_mechanic import ShiftMechanic
 from app.models.user import User
 from app.models.work_session import WorkSession
 
@@ -459,6 +460,159 @@ class ProductionService:
                 type_summary["mechanic_total"] += entry_mechanic_total
 
             return report
+
+    async def operator_period_report(
+        self,
+        user_id: int,
+        date_from,
+        date_to,
+    ) -> dict:
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(ProductionEntry, Shift)
+                    .join(Shift, ProductionEntry.shift_id == Shift.id)
+                    .where(
+                        ProductionEntry.operator_id == user_id,
+                        ProductionEntry.is_deleted.is_(False),
+                        Shift.work_date >= date_from,
+                        Shift.work_date <= date_to,
+                    )
+                    .order_by(Shift.work_date, Shift.shift_type)
+                )
+            ).all()
+            overtime_shift_ids = {
+                shift_id
+                for shift_id, in (
+                    await session.execute(
+                        select(WorkSession.shift_id)
+                        .where(
+                            WorkSession.user_id == user_id,
+                            WorkSession.is_overtime.is_(True),
+                        )
+                    )
+                ).all()
+            }
+
+        shifts = {}
+        total = Decimal("0")
+
+        for entry, shift in rows:
+            shift_data = shifts.setdefault(
+                shift.id,
+                {
+                    "shift": shift,
+                    "entries_count": 0,
+                    "packs": 0,
+                    "pieces": 0,
+                    "operator_total": Decimal("0"),
+                    "is_overtime": shift.id in overtime_shift_ids,
+                },
+            )
+            entry_total = Decimal(str(entry.operator_total))
+            shift_data["entries_count"] += 1
+            shift_data["packs"] += entry.packs
+            shift_data["pieces"] += entry.pieces
+            shift_data["operator_total"] += entry_total
+            total += entry_total
+
+        return {
+            "role": "operator",
+            "shifts_count": len(shifts),
+            "overtime_count": sum(
+                1 for item in shifts.values() if item["is_overtime"]
+            ),
+            "total": total,
+            "shifts": list(shifts.values()),
+        }
+
+    async def mechanic_period_report(
+        self,
+        user_id: int,
+        date_from,
+        date_to,
+    ) -> dict:
+        async with SessionLocal() as session:
+            mechanics = (
+                await session.execute(
+                    select(ShiftMechanic, Shift)
+                    .join(Shift, ShiftMechanic.shift_id == Shift.id)
+                    .where(
+                        ShiftMechanic.user_id == user_id,
+                        Shift.work_date >= date_from,
+                        Shift.work_date <= date_to,
+                    )
+                    .order_by(Shift.work_date, Shift.shift_type)
+                )
+            ).all()
+
+            shift_ids = [shift.id for _, shift in mechanics]
+
+            if not shift_ids:
+                return {
+                    "role": "mechanic",
+                    "shifts_count": 0,
+                    "overtime_count": 0,
+                    "total": Decimal("0"),
+                    "shifts": [],
+                }
+
+            mechanic_counts = {
+                shift_id: count
+                for shift_id, count in (
+                    await session.execute(
+                        select(
+                            ShiftMechanic.shift_id,
+                            func.count(ShiftMechanic.id),
+                        )
+                        .where(ShiftMechanic.shift_id.in_(shift_ids))
+                        .group_by(ShiftMechanic.shift_id)
+                    )
+                ).all()
+            }
+            shift_totals = {
+                shift_id: Decimal(str(total or 0))
+                for shift_id, total in (
+                    await session.execute(
+                        select(
+                            ProductionEntry.shift_id,
+                            func.sum(ProductionEntry.mechanic_total),
+                        )
+                        .where(
+                            ProductionEntry.shift_id.in_(shift_ids),
+                            ProductionEntry.is_deleted.is_(False),
+                        )
+                        .group_by(ProductionEntry.shift_id)
+                    )
+                ).all()
+            }
+
+        shifts = []
+        total = Decimal("0")
+
+        for mechanic, shift in mechanics:
+            mechanics_count = mechanic_counts.get(shift.id, 1) or 1
+            mechanic_total = shift_totals.get(shift.id, Decimal("0"))
+            share = money(mechanic_total / Decimal(mechanics_count))
+            total += share
+            shifts.append(
+                {
+                    "shift": shift,
+                    "mechanics_count": mechanics_count,
+                    "mechanic_total": mechanic_total,
+                    "share": share,
+                    "is_overtime": mechanic.is_overtime,
+                    "mechanic_type": mechanic.mechanic_type,
+                }
+            )
+
+        return {
+            "role": "mechanic",
+            "shifts_count": len(shifts),
+            "overtime_count": sum(1 for item in shifts if item["is_overtime"]),
+            "total": total,
+            "shifts": shifts,
+        }
 
     @staticmethod
     def _empty_summary() -> dict:

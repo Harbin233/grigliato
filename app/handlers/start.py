@@ -233,6 +233,7 @@ main_keyboard = keyboard([
 more_keyboard = keyboard([
     ["👥 Люди смены"],
     ["👤 Добавить оператора"],
+    ["📊 Отчеты"],
     ["🧮 Тестовый просчет"],
     ["✅ Закрыть смену"],
     ["🕒 Подработка"],
@@ -1379,6 +1380,18 @@ async def shift_calendar_menu(
     await send_shift_calendar(message, today.year, today.month)
 
 
+@router.message(F.text == "📊 Отчеты")
+async def reports_menu(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "Выберите период отчёта:",
+        reply_markup=report_period_keyboard(),
+    )
+
+
 @router.message(F.text == "👤 Добавить оператора")
 async def manual_operator_start(
     message: Message,
@@ -1572,6 +1585,135 @@ def roll_weight_text(weight) -> str:
     text = format(Decimal(str(weight)).quantize(Decimal("0.01")), "f")
     text = text.rstrip("0").rstrip(".")
     return f"{text} кг"
+
+
+REPORT_PERIODS = {
+    "month": "месяц",
+    "halfyear": "6 месяцев",
+    "year": "год",
+}
+
+
+def report_period_bounds(period: str) -> tuple[date, date]:
+    today = local_today()
+
+    if period == "month":
+        return date(today.year, today.month, 1), today
+
+    if period == "halfyear":
+        month = today.month - 5
+        year = today.year
+
+        while month < 1:
+            year -= 1
+            month += 12
+
+        return date(year, month, 1), today
+
+    if period == "year":
+        return date(today.year, 1, 1), today
+
+    raise ValueError(f"Unknown report period: {period}")
+
+
+def report_period_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Месяц",
+                    callback_data="report:summary:month",
+                ),
+                InlineKeyboardButton(
+                    text="6 месяцев",
+                    callback_data="report:summary:halfyear",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Год",
+                    callback_data="report:summary:year",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 В меню",
+                    callback_data="nav:main",
+                )
+            ],
+        ]
+    )
+
+
+def report_detail_keyboard(period: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Подробно по сменам",
+                    callback_data=f"report:detail:{period}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ Периоды",
+                    callback_data="report:periods",
+                )
+            ],
+        ]
+    )
+
+
+def report_summary_text(user, report: dict, period: str, date_from, date_to) -> str:
+    role = "Оператор" if report["role"] == "operator" else "Наладчик"
+
+    return (
+        f"📊 Отчёт за {REPORT_PERIODS[period]}\n"
+        f"{date_from:%d.%m.%Y} - {date_to:%d.%m.%Y}\n\n"
+        f"{user.full_name}\n"
+        f"Роль отчёта: {role}\n\n"
+        f"Смен: {report['shifts_count']}\n"
+        f"Подработок: {report['overtime_count']}\n"
+        f"Заработок: {money(Decimal(str(report['total'])))} ₽"
+    )
+
+
+def shift_type_text(shift) -> str:
+    return "день" if shift.shift_type.value == "day" else "ночь"
+
+
+def report_detail_text(user, report: dict, period: str, date_from, date_to) -> str:
+    lines = [
+        report_summary_text(user, report, period, date_from, date_to),
+        "",
+        "По сменам:",
+    ]
+
+    if not report["shifts"]:
+        lines.append("Нет данных за период.")
+        return "\n".join(lines)
+
+    for item in report["shifts"]:
+        shift = item["shift"]
+        overtime_text = " / подработка" if item["is_overtime"] else ""
+
+        if report["role"] == "operator":
+            lines.append(
+                f"- {shift.work_date:%d.%m.%Y}, смена №{shift.shift_number} "
+                f"({shift_type_text(shift)}{overtime_text}): "
+                f"{item['packs']} кор., {item['pieces']} шт., "
+                f"{money(Decimal(str(item['operator_total'])))} ₽"
+            )
+            continue
+
+        lines.append(
+            f"- {shift.work_date:%d.%m.%Y}, смена №{shift.shift_number} "
+            f"({shift_type_text(shift)}{overtime_text}): "
+            f"{item['share']} ₽ из {item['mechanic_total']} ₽ "
+            f"/ наладчиков {item['mechanics_count']}"
+        )
+
+    return "\n".join(lines)
 
 
 async def shift_close_data(active) -> dict:
@@ -2924,6 +3066,72 @@ async def shift_calendar_callback(
         return
 
     await send_shift_calendar(callback.message, year, month)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("report:"))
+async def report_callback(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+
+    if user is None:
+        await callback.message.answer("Сначала зарегистрируйтесь.")
+        await callback.answer()
+        return
+
+    payload = callback.data.split(":")
+
+    if len(payload) == 2 and payload[1] == "periods":
+        await callback.message.answer(
+            "Выберите период отчёта:",
+            reply_markup=report_period_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if len(payload) != 3:
+        await callback.answer()
+        return
+
+    _, mode, period = payload
+
+    if period not in REPORT_PERIODS:
+        await callback.answer()
+        return
+
+    date_from, date_to = report_period_bounds(period)
+
+    if user.role == UserRole.OPERATOR:
+        report = await production_service.operator_period_report(
+            user.id,
+            date_from,
+            date_to,
+        )
+    else:
+        report = await production_service.mechanic_period_report(
+            user.id,
+            date_from,
+            date_to,
+        )
+
+    if mode == "summary":
+        await callback.message.answer(
+            report_summary_text(user, report, period, date_from, date_to),
+            reply_markup=report_detail_keyboard(period),
+        )
+        await callback.answer()
+        return
+
+    if mode == "detail":
+        await callback.message.answer(
+            report_detail_text(user, report, period, date_from, date_to),
+            reply_markup=report_period_keyboard(),
+        )
+        await callback.answer()
+        return
+
     await callback.answer()
 
 
