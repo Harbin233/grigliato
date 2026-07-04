@@ -798,22 +798,46 @@ def shift_open_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     )
 
 
-def mechanic_type_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
+def mechanic_type_keyboard(
+    is_overtime: bool,
+    suggested: MechanicType | None = None,
+) -> InlineKeyboardMarkup:
+    suffix = "1" if is_overtime else "0"
+    buttons = [
+        (
+            "✅ Основной" if suggested == MechanicType.MAIN else "Основной",
+            f"mechanic_type:main:{suffix}",
+        ),
+        (
+            "✅ Вспомогательный"
+            if suggested == MechanicType.ASSISTANT
+            else "Вспомогательный",
+            f"mechanic_type:assistant:{suffix}",
+        ),
+    ]
+
+    if suggested == MechanicType.ASSISTANT:
+        buttons.reverse()
+
+    return with_action_navigation(
+        [action_navigation_row(*buttons)],
+        ("↩️ В меню", "nav:main"),
+    )
+
+
+def mechanic_saved_keyboard(is_overtime: bool) -> InlineKeyboardMarkup:
     suffix = "1" if is_overtime else "0"
     return with_action_navigation(
         [
             [
                 InlineKeyboardButton(
-                    text="Основной",
-                    callback_data=f"mechanic_type:main:{suffix}",
-                ),
-                InlineKeyboardButton(
-                    text="Вспомогательный",
-                    callback_data=f"mechanic_type:assistant:{suffix}",
-                ),
+                    text="🔁 Сменить статус",
+                    callback_data=f"mechanic_change:{suffix}",
+                )
             ]
         ],
-        ("↩️ В меню", "nav:main"),
+        ("🛠 Мои станки", "my_machines"),
+        ("🏠 В меню", "nav:main"),
     )
 
 
@@ -1328,25 +1352,55 @@ async def prompt_mechanic_status(
     active,
     user,
     is_overtime: bool,
+    force_change: bool = False,
 ) -> None:
     assigned = await shift_mechanic_service.get_by_shift_and_user(
         active.id,
         user.id,
     )
 
-    if assigned:
+    if assigned and not force_change:
         overtime_text = "\nПодработка: да" if assigned.is_overtime else ""
         await message.answer(
             "✅ Вы уже отмечены в смене.\n\n"
             f"Смена №{active.shift_number}\n"
             f"Статус: {mechanic_status_text(assigned.mechanic_type)}"
-            f"{overtime_text}"
+            f"{overtime_text}",
+            reply_markup=mechanic_saved_keyboard(assigned.is_overtime),
         )
         return
 
+    last = await shift_mechanic_service.get_last_for_user(
+        user.id,
+        exclude_shift_id=active.id,
+    )
+    main_count = await shift_mechanic_service.count_main(
+        active.id,
+        exclude_user_id=user.id,
+    )
+
+    if last and last.mechanic_type == MechanicType.MAIN:
+        suggested = MechanicType.ASSISTANT
+    elif last and last.mechanic_type == MechanicType.ASSISTANT:
+        suggested = MechanicType.MAIN
+    else:
+        suggested = (
+            MechanicType.MAIN
+            if main_count < 2
+            else MechanicType.ASSISTANT
+        )
+
+    if suggested == MechanicType.MAIN and main_count >= 2:
+        suggested = MechanicType.ASSISTANT
+
+    suggestion_text = (
+        f"Похоже, сегодня вы {mechanic_status_text(suggested)}.\n"
+        "Подтвердите или выберите другой статус:"
+    )
+
     await message.answer(
-        "Выберите статус наладчика в этой смене:",
-        reply_markup=mechanic_type_keyboard(is_overtime),
+        suggestion_text,
+        reply_markup=mechanic_type_keyboard(is_overtime, suggested),
     )
 
 
@@ -5239,6 +5293,37 @@ async def select_mechanic_type(
         f"{overtime_text}"
     )
     await show_my_machines(callback.message, user, active)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("mechanic_change:"))
+async def change_mechanic_type(
+    callback: CallbackQuery,
+):
+    user = await user_service.get_by_telegram_id(callback.from_user.id)
+    user = await ensure_admin_role(user)
+    active = await shift_service.get_active_shift()
+
+    if user is None or active is None:
+        await callback.message.answer("Смена не найдена.")
+        await callback.answer()
+        return
+
+    if not is_mechanic_role(user):
+        await callback.message.answer(
+            "Этот выбор доступен только наладчикам."
+        )
+        await callback.answer()
+        return
+
+    is_overtime = callback.data.endswith(":1")
+    await prompt_mechanic_status(
+        callback.message,
+        active,
+        user,
+        is_overtime,
+        force_change=True,
+    )
     await callback.answer()
 
 

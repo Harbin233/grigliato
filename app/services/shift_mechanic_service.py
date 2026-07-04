@@ -1,6 +1,7 @@
-from sqlalchemy import delete, select
+from sqlalchemy import delete, desc, select
 
 from app.db.session import SessionLocal
+from app.models.shift import Shift
 from app.models.shift_mechanic import ShiftMechanic, MechanicType
 
 
@@ -32,6 +33,26 @@ class ShiftMechanicService:
             if mechanic.mechanic_type == MechanicType.MAIN
             and mechanic.user_id != exclude_user_id
         )
+
+    async def get_last_for_user(
+        self,
+        user_id: int,
+        *,
+        exclude_shift_id: int | None = None,
+    ) -> ShiftMechanic | None:
+        async with SessionLocal() as session:
+            query = (
+                select(ShiftMechanic)
+                .join(Shift, ShiftMechanic.shift_id == Shift.id)
+                .where(ShiftMechanic.user_id == user_id)
+                .order_by(desc(Shift.work_date), desc(Shift.started_at))
+            )
+
+            if exclude_shift_id is not None:
+                query = query.where(ShiftMechanic.shift_id != exclude_shift_id)
+
+            result = await session.execute(query.limit(1))
+            return result.scalar_one_or_none()
 
     async def assign(
         self,
