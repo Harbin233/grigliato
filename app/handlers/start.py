@@ -69,6 +69,7 @@ def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
 RAIL_CLASSES = {
     "Эконом": ["Мама", "Папа", "Напр"],
     "GL15": ["Мама", "Папа", "L"],
+    "GL24": ["Мама", "Папа", "L"],
     "Grigliato": ["Мама", "Папа", "Напр"],
     "Пирамида": ["Мама", "Папа", "Напр"],
 }
@@ -79,6 +80,9 @@ RAIL_PRICE_GROUPS = {
         ["Напр"],
     ],
     "GL15": [
+        ["Мама", "Папа", "L"],
+    ],
+    "GL24": [
         ["Мама", "Папа", "L"],
     ],
     "Grigliato": [
@@ -99,7 +103,7 @@ RAIL_SHAPE_CODES = {
 }
 
 ECONOM_GUIDE_LENGTHS = ["0.6", "1.2", "2.40"]
-KNOWN_RAIL_CLASSES = ["Эконом", "GL15", "Grigliato", "Пирамида"]
+KNOWN_RAIL_CLASSES = ["Эконом", "GL15", "GL24", "Grigliato", "Пирамида"]
 KNOWN_RAIL_SHAPES = ["Мама", "Папа", "Напр", "L"]
 RAIL_GROUP_FIELDS = ["rail_class", "shape", "guide_length", "cell", "h", "b"]
 
@@ -172,7 +176,8 @@ econom_guide_length_keyboard = keyboard([
 
 rail_class_keyboard = keyboard([
     ["Эконом", "GL15"],
-    ["Grigliato", "Пирамида"],
+    ["GL24", "Grigliato"],
+    ["Пирамида"],
     ["↩️ Назад"],
 ])
 
@@ -192,9 +197,9 @@ def rail_shape_keyboard(rail_class: str) -> ReplyKeyboardMarkup:
 
 
 def rail_base_name_prompt(rail_class: str) -> str:
-    if rail_class == "GL15":
+    if rail_class in ("GL15", "GL24"):
         return (
-            "Введите модель или размер без класса GL15 и без вида рейки.\n\n"
+            f"Введите модель или размер без класса {rail_class} и без вида рейки.\n\n"
             "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
             "Например: 75x75 h37 b15\n"
             "или: 75x75 h37 b15"
