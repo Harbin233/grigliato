@@ -1792,6 +1792,35 @@ def report_summary_text(user, report: dict, period: str, date_from, date_to) -> 
     )
 
 
+def combined_report_summary_text(
+    user,
+    operator_report: dict,
+    mechanic_report: dict,
+    period: str,
+    date_from,
+    date_to,
+) -> str:
+    operator_total = money(Decimal(str(operator_report["total"])))
+    mechanic_total = money(Decimal(str(mechanic_report["total"])))
+    total = money(operator_total + mechanic_total)
+
+    return (
+        f"📊 Отчёт за {REPORT_PERIODS[period]}\n"
+        f"{date_from:%d.%m.%Y} - {date_to:%d.%m.%Y}\n\n"
+        f"{user.full_name}\n"
+        "Роль отчёта: Наладчик-оператор\n\n"
+        "Операторская часть:\n"
+        f"Смен: {operator_report['shifts_count']}\n"
+        f"Подработок: {operator_report['overtime_count']}\n"
+        f"Заработок: {operator_total} ₽\n\n"
+        "Наладочная часть:\n"
+        f"Смен: {mechanic_report['shifts_count']}\n"
+        f"Подработок: {mechanic_report['overtime_count']}\n"
+        f"Заработок: {mechanic_total} ₽\n\n"
+        f"Итого: {total} ₽"
+    )
+
+
 def shift_type_text(shift) -> str:
     return "день" if shift.shift_type.value == "day" else "ночь"
 
@@ -1828,6 +1857,44 @@ def report_detail_text(user, report: dict, period: str, date_from, date_to) -> s
         )
 
     return "\n".join(lines)
+
+
+def combined_report_detail_text(
+    user,
+    operator_report: dict,
+    mechanic_report: dict,
+    period: str,
+    date_from,
+    date_to,
+) -> str:
+    return "\n\n".join(
+        [
+            combined_report_summary_text(
+                user,
+                operator_report,
+                mechanic_report,
+                period,
+                date_from,
+                date_to,
+            ),
+            "Операторская детализация:\n"
+            + report_detail_text(
+                user,
+                operator_report,
+                period,
+                date_from,
+                date_to,
+            ),
+            "Наладочная детализация:\n"
+            + report_detail_text(
+                user,
+                mechanic_report,
+                period,
+                date_from,
+                date_to,
+            ),
+        ]
+    )
 
 
 async def shift_close_data(active) -> dict:
@@ -3216,6 +3283,48 @@ async def report_callback(
         return
 
     date_from, date_to = report_period_bounds(period)
+
+    if user.role == UserRole.MECHANIC_OPERATOR:
+        operator_report = await production_service.operator_period_report(
+            user.id,
+            date_from,
+            date_to,
+        )
+        mechanic_report = await production_service.mechanic_period_report(
+            user.id,
+            date_from,
+            date_to,
+        )
+
+        if mode == "summary":
+            await callback.message.answer(
+                combined_report_summary_text(
+                    user,
+                    operator_report,
+                    mechanic_report,
+                    period,
+                    date_from,
+                    date_to,
+                ),
+                reply_markup=report_detail_keyboard(period),
+            )
+            await callback.answer()
+            return
+
+        if mode == "detail":
+            await callback.message.answer(
+                combined_report_detail_text(
+                    user,
+                    operator_report,
+                    mechanic_report,
+                    period,
+                    date_from,
+                    date_to,
+                ),
+                reply_markup=report_period_keyboard(),
+            )
+            await callback.answer()
+            return
 
     if user.role == UserRole.OPERATOR:
         report = await production_service.operator_period_report(
