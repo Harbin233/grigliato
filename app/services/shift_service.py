@@ -19,6 +19,10 @@ def shift_matches_resolved(
     )
 
 
+def is_mechanic_role(user: User) -> bool:
+    return user.role in (UserRole.MECHANIC, UserRole.MECHANIC_OPERATOR)
+
+
 class ShiftService:
 
     async def get_active_shift(
@@ -58,7 +62,7 @@ class ShiftService:
             )
 
         if (
-            user.role == UserRole.MECHANIC
+            is_mechanic_role(user)
             and user.shift_number != resolved.shift_number
             and not allow_overtime
         ):

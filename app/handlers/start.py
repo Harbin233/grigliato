@@ -54,14 +54,29 @@ def is_admin_id(telegram_id: int) -> bool:
 def role_text(role: UserRole) -> str:
     if role == UserRole.ADMIN:
         return "Админ / мастер"
+    if role == UserRole.MECHANIC_OPERATOR:
+        return "Наладчик-оператор"
     if role == UserRole.MECHANIC:
         return "Наладчик"
     return "Оператор"
 
 
+def is_mechanic_role(user) -> bool:
+    return user.role in (UserRole.MECHANIC, UserRole.MECHANIC_OPERATOR)
+
+
+def can_manage_shift(user) -> bool:
+    return user.role == UserRole.ADMIN or is_mechanic_role(user)
+
+
+def can_work_as_operator(user) -> bool:
+    return user.role in (UserRole.OPERATOR, UserRole.MECHANIC_OPERATOR)
+
+
 def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
     buttons = [
         ["🔧 Наладчик"],
+        ["🔧👷 Наладчик-оператор"],
         ["👷 Оператор"],
     ]
 
@@ -1394,7 +1409,7 @@ async def operator_sos(
         await message.answer("Сначала зарегистрируйтесь.")
         return
 
-    if user.role != UserRole.OPERATOR:
+    if not can_work_as_operator(user):
         await message.answer("SOS по станку доступен оператору.")
         return
 
@@ -1464,7 +1479,7 @@ async def manual_operator_start(
     user = await user_service.get_by_telegram_id(message.from_user.id)
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await message.answer(
             "Оператора вручную добавляет наладчик или админ/мастер."
         )
@@ -1500,7 +1515,7 @@ async def handle_work_start(
     active = await shift_service.get_active_shift()
 
     if active is None:
-        if user.role in (UserRole.ADMIN, UserRole.MECHANIC):
+        if can_manage_shift(user):
             await message.answer(
                 "Смена еще не открыта.",
                 reply_markup=shift_open_keyboard(is_overtime),
@@ -1532,7 +1547,22 @@ async def handle_work_start(
         )
         return
 
-    if user.role == UserRole.MECHANIC:
+    if is_mechanic_role(user):
+        assigned_mechanic = await shift_mechanic_service.get_by_shift_and_user(
+            active.id,
+            user.id,
+        )
+
+        if assigned_mechanic is None or user.role == UserRole.MECHANIC:
+            await prompt_mechanic_status(
+                message,
+                active,
+                user,
+                is_overtime,
+            )
+            return
+
+    if not can_work_as_operator(user):
         await prompt_mechanic_status(
             message,
             active,
@@ -2084,7 +2114,7 @@ async def my_machines_message(
         await message.answer("Сначала зарегистрируйтесь.")
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await message.answer("Этот раздел доступен наладчику или админу/мастеру.")
         return
 
@@ -2108,7 +2138,7 @@ async def shift_people_message(
         await message.answer("Сначала зарегистрируйтесь.")
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await message.answer("Раздел доступен наладчику или админу/мастеру.")
         return
 
@@ -2132,7 +2162,7 @@ async def close_shift_start(
         await message.answer("Сначала зарегистрируйтесь.")
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await message.answer("Смену закрывает наладчик или админ/мастер.")
         return
 
@@ -2182,7 +2212,7 @@ async def add_production(
         await message.answer("Сначала зарегистрируйтесь.")
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await message.answer("Продукцию добавляет наладчик или админ/мастер.")
         return
 
@@ -2316,7 +2346,7 @@ async def manual_operator_shift(
     creator = await user_service.get_by_telegram_id(message.from_user.id)
     creator = await ensure_admin_role(creator)
 
-    if creator is None or creator.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if creator is None or not can_manage_shift(creator):
         await message.answer("Недостаточно прав.")
         await state.clear()
         return
@@ -2805,7 +2835,7 @@ async def select_production_group(
     user = await user_service.get_by_telegram_id(callback.from_user.id)
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -3032,7 +3062,7 @@ async def select_machine_production_group(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -3276,7 +3306,7 @@ async def inline_navigation(
         user = await user_service.get_by_telegram_id(callback.from_user.id)
         user = await ensure_admin_role(user)
 
-        if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        if user is None or not can_manage_shift(user):
             await callback.message.answer(
                 "Продукцию записывает наладчик или админ/мастер."
             )
@@ -3308,7 +3338,7 @@ async def inline_navigation(
         user = await user_service.get_by_telegram_id(callback.from_user.id)
         user = await ensure_admin_role(user)
 
-        if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        if user is None or not can_manage_shift(user):
             await callback.message.answer(
                 "Продукцию записывает наладчик или админ/мастер."
             )
@@ -3355,7 +3385,7 @@ async def close_shift_confirm(
     user = await user_service.get_by_telegram_id(callback.from_user.id)
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Смену закрывает наладчик или админ/мастер."
         )
@@ -3410,7 +3440,7 @@ async def finish_operator_from_shift(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer("Раздел доступен наладчику.")
         await callback.answer()
         return
@@ -3444,7 +3474,7 @@ async def finish_mechanic_from_shift(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer("Раздел доступен наладчику.")
         await callback.answer()
         return
@@ -3480,7 +3510,7 @@ async def my_machines_callback(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer("Этот раздел доступен наладчику.")
         await callback.answer()
         return
@@ -3502,7 +3532,7 @@ async def take_machines_callback(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer("Этот раздел доступен наладчику.")
         await callback.answer()
         return
@@ -3525,7 +3555,7 @@ async def assign_machine_to_mechanic(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer("Этот раздел доступен наладчику.")
         await callback.answer()
         return
@@ -3833,7 +3863,7 @@ async def select_production_machine(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию добавляет наладчик или админ/мастер."
         )
@@ -3884,7 +3914,7 @@ async def production_machine_catalog(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию добавляет наладчик или админ/мастер."
         )
@@ -3918,7 +3948,7 @@ async def select_frequent_production_rail(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию добавляет наладчик или админ/мастер."
         )
@@ -3945,7 +3975,7 @@ async def select_production_rail_first(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -3978,7 +4008,7 @@ async def confirm_production_rail(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -4054,7 +4084,7 @@ async def set_active_machine_rail(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer(
             "Рейку ставит в работу наладчик или админ/мастер."
         )
@@ -4108,7 +4138,7 @@ async def start_machine_product_work(
         await callback.answer()
         return
 
-    if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -4589,7 +4619,7 @@ async def select_production_machine_for_rail(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию записывает наладчик или админ/мастер."
         )
@@ -4658,7 +4688,7 @@ async def select_production_rail(
     )
     user = await ensure_admin_role(user)
 
-    if user is None or user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+    if user is None or not can_manage_shift(user):
         await callback.message.answer(
             "Продукцию добавляет наладчик или админ/мастер."
         )
@@ -4764,7 +4794,7 @@ async def input_production_packs(
     if entry_mode != "test_calc":
         active = await shift_service.get_active_shift()
 
-        if user.role not in (UserRole.ADMIN, UserRole.MECHANIC):
+        if not can_manage_shift(user):
             await message.answer("Продукцию добавляет наладчик или админ/мастер.")
             await state.clear()
             return
@@ -4911,7 +4941,7 @@ async def open_shift(
 
     await callback.message.answer(text)
 
-    if ok and user.role == UserRole.MECHANIC:
+    if ok and is_mechanic_role(user):
         active = await shift_service.get_active_shift()
         await prompt_mechanic_status(
             callback.message,
@@ -4943,7 +4973,7 @@ async def select_mechanic_type(
         await callback.answer()
         return
 
-    if user.role != UserRole.MECHANIC:
+    if not is_mechanic_role(user):
         await callback.message.answer(
             "Этот выбор доступен только наладчикам."
         )
@@ -5015,7 +5045,7 @@ async def select_machine(
         await callback.answer()
         return
 
-    if user.role != UserRole.OPERATOR:
+    if not can_work_as_operator(user):
         await callback.message.answer("Станок выбирает оператор.")
         await callback.answer()
         return
@@ -5090,6 +5120,8 @@ async def input_role(
         role = UserRole.ADMIN
     elif message.text == "🔧 Наладчик":
         role = UserRole.MECHANIC
+    elif message.text == "🔧👷 Наладчик-оператор":
+        role = UserRole.MECHANIC_OPERATOR
     elif message.text == "👷 Оператор":
         role = UserRole.OPERATOR
     else:

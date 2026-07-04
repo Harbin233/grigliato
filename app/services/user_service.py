@@ -66,11 +66,28 @@ class UserService:
 
             return result.scalars().all()
 
+    async def get_by_roles(self, roles: tuple[UserRole, ...]):
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(User)
+                .where(
+                    User.role.in_(roles),
+                    User.is_active.is_(True),
+                )
+                .order_by(User.full_name)
+            )
+
+            return result.scalars().all()
+
     async def get_mechanics(self):
-        return await self.get_by_role(UserRole.MECHANIC)
+        return await self.get_by_roles(
+            (UserRole.MECHANIC, UserRole.MECHANIC_OPERATOR)
+        )
 
     async def get_operators(self):
-        return await self.get_by_role(UserRole.OPERATOR)
+        return await self.get_by_roles(
+            (UserRole.OPERATOR, UserRole.MECHANIC_OPERATOR)
+        )
 
     async def get_admins(self):
         return await self.get_by_role(UserRole.ADMIN)

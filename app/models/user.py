@@ -10,6 +10,7 @@ class UserRole(str, Enum):
     ADMIN = "ADMIN"
     OPERATOR = "OPERATOR"
     MECHANIC = "MECHANIC"
+    MECHANIC_OPERATOR = "MECHANIC_OPERATOR"
 
 
 class User(BaseModel):
