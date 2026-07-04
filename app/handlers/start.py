@@ -161,6 +161,7 @@ main_keyboard = keyboard([
 
 admin_keyboard = keyboard([
     ["➕ Добавить рейку"],
+    ["🚪 Выйти из админ режима"],
     ["↩️ Назад"],
 ])
 
@@ -1831,6 +1832,7 @@ async def admin_mode(
 
 
 @router.message(F.text == "↩️ Назад")
+@router.message(F.text == "🚪 Выйти из админ режима")
 async def back_to_main(
     message: Message,
     state: FSMContext,
