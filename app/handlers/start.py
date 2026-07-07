@@ -1616,8 +1616,8 @@ async def handle_work_start(
 
     if user.role == UserRole.ADMIN:
         await message.answer(
-            "✅ Админ-режим активен.\n\n"
-            f"Открыта смена №{active.shift_number}."
+            f"Открыта смена №{active.shift_number}.",
+            reply_markup=main_keyboard,
         )
         return
 
@@ -3444,8 +3444,8 @@ async def overtime_start_callback(
 
     if user.role == UserRole.ADMIN:
         await callback.message.answer(
-            "✅ Админ-режим активен.\n\n"
-            f"Открыта смена №{active.shift_number}."
+            f"Открыта смена №{active.shift_number}.",
+            reply_markup=main_keyboard,
         )
         await callback.answer()
         return
@@ -5217,9 +5217,6 @@ async def open_shift(
             user,
             is_overtime,
         )
-
-    if ok and user.role == UserRole.ADMIN:
-        await callback.message.answer("✅ Админ-режим активен.")
 
     await callback.answer()
 
