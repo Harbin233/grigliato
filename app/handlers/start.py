@@ -647,33 +647,52 @@ def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
 def render_shift_calendar(year: int, month: int) -> str:
     today = local_today()
     first_weekday, days_count = monthrange(year, month)
-    cells = [""] * first_weekday
+    cells = [None] * first_weekday
 
     for day in range(1, days_count + 1):
+        work_date = date(year, month, day)
         day_shift, night_shift = get_shift_numbers_for_date(
-            date(year, month, day)
+            work_date,
         )
-        day_text = f"{day:02d}"
-
-        if today == date(year, month, day):
-            day_text = f"[{day_text}]"
-
-        cells.append(f"{day_text}:{day_shift}/{night_shift}")
+        cells.append((work_date, day_shift, night_shift))
 
     while len(cells) % 7:
-        cells.append("")
+        cells.append(None)
 
     lines = [
         f"📅 {MONTH_NAMES[month]} {year}",
-        "Формат: дата:дневная/ночная смена",
+        "Верхняя строка — дата, нижняя — дневная/ночная.",
+        "* сегодня",
         "",
-        "Пн       Вт       Ср       Чт       Пт       Сб       Вс",
+        "<pre>",
+        "Пн   Вт   Ср   Чт   Пт   Сб   Вс",
     ]
 
     for index in range(0, len(cells), 7):
         row = cells[index:index + 7]
-        lines.append(" ".join(f"{cell:^8}" for cell in row).rstrip())
+        date_line = []
+        shift_line = []
 
+        for cell in row:
+            if cell is None:
+                date_line.append("    ")
+                shift_line.append("    ")
+                continue
+
+            work_date, day_shift, night_shift = cell
+            day_text = f"{work_date.day:02d}"
+
+            if work_date == today:
+                day_text = f"{work_date.day:02d}*"
+
+            date_line.append(f"{day_text:<4}")
+            shift_line.append(f"{day_shift}/{night_shift:<2}")
+
+        lines.append(" ".join(date_line).rstrip())
+        lines.append(" ".join(shift_line).rstrip())
+        lines.append("")
+
+    lines.append("</pre>")
     return "\n".join(lines)
 
 
@@ -681,6 +700,7 @@ async def send_shift_calendar(message: Message, year: int, month: int) -> None:
     await message.answer(
         render_shift_calendar(year, month),
         reply_markup=shift_calendar_keyboard(year, month),
+        parse_mode="HTML",
     )
 
 
