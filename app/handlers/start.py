@@ -198,6 +198,7 @@ RAIL_CLASSES = {
     "GL24": ["Мама", "Папа", "L"],
     "Grigliato": ["Мама", "Папа", "Напр"],
     "Пирамида": ["Мама", "Папа", "Напр"],
+    "Triangle": ["Мама", "Папа", "Напр", "D1", "D2", "D3", "D4"],
 }
 
 RAIL_PRICE_GROUPS = {
@@ -219,6 +220,11 @@ RAIL_PRICE_GROUPS = {
         ["Мама", "Папа"],
         ["Напр"],
     ],
+    "Triangle": [
+        ["Мама", "Папа"],
+        ["Напр"],
+        ["D1", "D2", "D3", "D4"],
+    ],
 }
 
 RAIL_SHAPE_CODES = {
@@ -226,11 +232,22 @@ RAIL_SHAPE_CODES = {
     "papa": "Папа",
     "napr": "Напр",
     "l": "L",
+    "d1": "D1",
+    "d2": "D2",
+    "d3": "D3",
+    "d4": "D4",
 }
 
 ECONOM_GUIDE_LENGTHS = ["0.6", "1.2", "2.40"]
-KNOWN_RAIL_CLASSES = ["Эконом", "GL15", "GL24", "Grigliato", "Пирамида"]
-KNOWN_RAIL_SHAPES = ["Мама", "Папа", "Напр", "L"]
+KNOWN_RAIL_CLASSES = [
+    "Эконом",
+    "GL15",
+    "GL24",
+    "Grigliato",
+    "Пирамида",
+    "Triangle",
+]
+KNOWN_RAIL_SHAPES = ["Мама", "Папа", "Напр", "L", "D1", "D2", "D3", "D4"]
 RAIL_GROUP_FIELDS = ["rail_class", "shape", "guide_length", "cell", "h", "b"]
 
 
@@ -311,7 +328,7 @@ econom_guide_length_keyboard = keyboard([
 rail_class_keyboard = keyboard([
     ["Эконом", "GL15"],
     ["GL24", "Grigliato"],
-    ["Пирамида"],
+    ["Пирамида", "Triangle"],
     ["↩️ Назад"],
 ])
 
@@ -340,7 +357,7 @@ def rail_base_name_prompt(rail_class: str) -> str:
         )
 
     return (
-        "Введите модель или размер без класса Эконом и без вида рейки.\n\n"
+        f"Введите модель или размер без класса {rail_class} и без вида рейки.\n\n"
         "Это ручное поле: можно ввести любую новую ячейку/размер.\n\n"
         "Например: 50x40x10\n"
         "или: направляющая 40x20"
