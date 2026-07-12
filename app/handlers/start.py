@@ -17,7 +17,7 @@ from aiogram.types import (
 )
 
 from app.core.config import settings
-from app.core.shift_calendar import get_shift_numbers_for_date
+from app.core.shift_calendar import get_shift_numbers_for_date, resolve_shift
 from app.models.shift_mechanic import MechanicType
 from app.models.user import UserRole
 from app.services.active_machine_rail_service import active_machine_rail_service
@@ -26,7 +26,7 @@ from app.services.production_service import production_service, whole_meters
 from app.services.rail_service import rail_service
 from app.services.shift_machine_service import shift_machine_service
 from app.services.shift_mechanic_service import shift_mechanic_service
-from app.services.shift_service import shift_service
+from app.services.shift_service import shift_matches_resolved, shift_service
 from app.services.user_service import user_service
 from app.services.work_session_service import work_session_service
 from app.states.admin import AdminRailState, ManualOperatorState
@@ -65,12 +65,46 @@ def is_mechanic_role(user) -> bool:
     return user.role in (UserRole.MECHANIC, UserRole.MECHANIC_OPERATOR)
 
 
+def can_choose_mechanic_status(user) -> bool:
+    return user.role == UserRole.ADMIN or is_mechanic_role(user)
+
+
 def can_manage_shift(user) -> bool:
     return user.role == UserRole.ADMIN or is_mechanic_role(user)
 
 
 def can_work_as_operator(user) -> bool:
     return user.role in (UserRole.OPERATOR, UserRole.MECHANIC_OPERATOR)
+
+
+def shift_is_current(active) -> bool:
+    return shift_matches_resolved(active, resolve_shift())
+
+
+async def prompt_or_show_mechanic_status(
+    message: Message,
+    user,
+    active,
+    is_overtime: bool,
+) -> bool:
+    if not can_choose_mechanic_status(user):
+        return False
+
+    assigned_mechanic = await shift_mechanic_service.get_by_shift_and_user(
+        active.id,
+        user.id,
+    )
+
+    if assigned_mechanic is None:
+        await prompt_mechanic_status(
+            message,
+            active,
+            user,
+            is_overtime,
+        )
+        return True
+
+    return False
 
 
 def registration_role_keyboard(allow_admin: bool) -> ReplyKeyboardMarkup:
@@ -1601,6 +1635,29 @@ async def handle_work_start(
         )
         return
 
+    if not shift_is_current(active):
+        if not can_manage_shift(user):
+            await message.answer(
+                "Предыдущая смена не закрыта.\n"
+                "Дождитесь наладчика или админа, чтобы открыть текущую смену."
+            )
+            return
+
+        ok, text = await shift_service.start_shift(
+            user,
+            allow_overtime=is_overtime,
+        )
+        await message.answer(text)
+
+        if not ok:
+            return
+
+        active = await shift_service.get_active_shift()
+
+        if active is None:
+            await message.answer("Не удалось открыть текущую смену.")
+            return
+
     if (
         not is_overtime
         and user.role != UserRole.ADMIN
@@ -1615,26 +1672,27 @@ async def handle_work_start(
         return
 
     if user.role == UserRole.ADMIN:
+        if await prompt_or_show_mechanic_status(
+            message,
+            user,
+            active,
+            is_overtime,
+        ):
+            return
+
         await message.answer(
             f"Открыта смена №{active.shift_number}.",
             reply_markup=main_keyboard,
         )
         return
 
-    if is_mechanic_role(user):
-        assigned_mechanic = await shift_mechanic_service.get_by_shift_and_user(
-            active.id,
-            user.id,
-        )
-
-        if assigned_mechanic is None or user.role == UserRole.MECHANIC:
-            await prompt_mechanic_status(
-                message,
-                active,
-                user,
-                is_overtime,
-            )
-            return
+    if await prompt_or_show_mechanic_status(
+        message,
+        user,
+        active,
+        is_overtime,
+    ):
+        return
 
     if not can_work_as_operator(user):
         await prompt_mechanic_status(
@@ -2263,6 +2321,27 @@ async def my_machines_message(
 
     if active is None:
         await message.answer("Сначала откройте смену.")
+        return
+
+    if not shift_is_current(active):
+        ok, text = await shift_service.start_shift(user)
+        await message.answer(text)
+
+        if not ok:
+            return
+
+        active = await shift_service.get_active_shift()
+
+        if active is None:
+            await message.answer("Не удалось открыть текущую смену.")
+            return
+
+    if await prompt_or_show_mechanic_status(
+        message,
+        user,
+        active,
+        False,
+    ):
         return
 
     await show_my_machines(message, user, active)
@@ -3442,7 +3521,42 @@ async def overtime_start_callback(
         await callback.answer()
         return
 
+    if not shift_is_current(active):
+        if not can_manage_shift(user):
+            await callback.message.answer(
+                "Предыдущая смена не закрыта.\n"
+                "Дождитесь наладчика или админа, чтобы открыть текущую смену."
+            )
+            await callback.answer()
+            return
+
+        ok, text = await shift_service.start_shift(
+            user,
+            allow_overtime=True,
+        )
+        await callback.message.answer(text)
+
+        if not ok:
+            await callback.answer()
+            return
+
+        active = await shift_service.get_active_shift()
+
+        if active is None:
+            await callback.message.answer("Не удалось открыть текущую смену.")
+            await callback.answer()
+            return
+
     if user.role == UserRole.ADMIN:
+        if await prompt_or_show_mechanic_status(
+            callback.message,
+            user,
+            active,
+            True,
+        ):
+            await callback.answer()
+            return
+
         await callback.message.answer(
             f"Открыта смена №{active.shift_number}.",
             reply_markup=main_keyboard,
@@ -3450,21 +3564,14 @@ async def overtime_start_callback(
         await callback.answer()
         return
 
-    if is_mechanic_role(user):
-        assigned_mechanic = await shift_mechanic_service.get_by_shift_and_user(
-            active.id,
-            user.id,
-        )
-
-        if assigned_mechanic is None or user.role == UserRole.MECHANIC:
-            await prompt_mechanic_status(
-                callback.message,
-                active,
-                user,
-                True,
-            )
-            await callback.answer()
-            return
+    if await prompt_or_show_mechanic_status(
+        callback.message,
+        user,
+        active,
+        True,
+    ):
+        await callback.answer()
+        return
 
     if not can_work_as_operator(user):
         await callback.message.answer("Подработка доступна оператору или наладчику-оператору.")
@@ -5209,7 +5316,7 @@ async def open_shift(
         ),
     )
 
-    if ok and is_mechanic_role(user):
+    if ok and can_choose_mechanic_status(user):
         active = await shift_service.get_active_shift()
         await prompt_mechanic_status(
             callback.message,
@@ -5238,9 +5345,9 @@ async def select_mechanic_type(
         await callback.answer()
         return
 
-    if not is_mechanic_role(user):
+    if not can_choose_mechanic_status(user):
         await callback.message.answer(
-            "Этот выбор доступен только наладчикам."
+            "Этот выбор доступен наладчику или админу/мастеру."
         )
         await callback.answer()
         return

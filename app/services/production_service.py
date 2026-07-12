@@ -26,14 +26,26 @@ def whole_meters(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def is_guide_rail(rail: Rail) -> bool:
+    name = rail.name.lower().replace("ё", "е")
+    parts = {
+        part.strip(".,;:()[]")
+        for part in name.split()
+    }
+
+    return "напр" in parts or "направляющая" in parts
+
+
 def guide_pay_multiplier(rail: Rail, rail_length: Decimal) -> int:
-    if " Напр " not in rail.name:
+    if not is_guide_rail(rail):
         return 1
 
-    if rail_length == Decimal("1.200"):
+    length = rail_length.quantize(Decimal("0.001"))
+
+    if length == Decimal("1.200"):
         return 2
 
-    if rail_length == Decimal("2.400"):
+    if length == Decimal("2.400"):
         return 4
 
     return 1
@@ -46,13 +58,16 @@ class ProductionService:
         packs: int,
     ) -> dict:
         rail = machine_rail.rail
-        pieces = packs * rail.pieces_per_pack
+        physical_pieces = packs * rail.pieces_per_pack
         rail_length = Decimal(str(rail.length))
         operator_price = Decimal(str(machine_rail.operator_price))
         mechanic_price = Decimal(str(machine_rail.mechanic_price))
-        payable_pieces = pieces * guide_pay_multiplier(rail, rail_length)
+        payable_pieces = physical_pieces * guide_pay_multiplier(
+            rail,
+            rail_length,
+        )
 
-        total_meters = meters(Decimal(pieces) * rail_length)
+        total_meters = meters(Decimal(physical_pieces) * rail_length)
         operator_total = money(
             Decimal(payable_pieces) / Decimal(1000) * operator_price
         )
@@ -61,7 +76,8 @@ class ProductionService:
         )
 
         return {
-            "pieces": pieces,
+            "pieces": payable_pieces,
+            "physical_pieces": physical_pieces,
             "payable_pieces": payable_pieces,
             "meters": total_meters,
             "operator_price": operator_price,

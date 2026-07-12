@@ -8,6 +8,7 @@ from app.core.logging import logger
 from app.core.startup import initialize_reference_data
 from app.db.session import engine
 from app.handlers import routers
+from app.services.shift_reminder_service import shift_close_reminder_loop
 
 
 async def check_database() -> None:
@@ -38,6 +39,8 @@ async def main() -> None:
 
     logger.success("Бот успешно запущен")
     logger.info("========================================")
+
+    asyncio.create_task(shift_close_reminder_loop(bot))
 
     await dp.start_polling(bot)
 
